@@ -1,3 +1,4 @@
+STATUS: March 31, 2025: Properly formatted Vivoh WebTransport Media Packets are being created by the publisher and sent via the server to the client but the client is not yet parsing and rendering these correctly. I'll work on this more tomorrow.
 
 Server Command:
 ```

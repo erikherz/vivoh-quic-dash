@@ -434,6 +434,14 @@ impl DashReader {
         const MAX_SEEN: usize = 10;
         
         loop {
+
+            // Check if channel is still open before trying to send
+            if tx.receiver_count() == 0 {
+                warn!("No receivers listening, waiting...");
+                sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+
             let mpd = match read_file(self.input_dir.join("stream.mpd")) {
                 Ok(data) => data,
                 Err(e) => {
