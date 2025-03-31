@@ -141,7 +141,7 @@ async fn main() -> Result<(), VqdError> {
         }
     });
 
-    // Create a single reader task that waits for the connection
+    // Create a reader task that waits for the connection to be ready
     let connection_ready_for_reader = connection_ready.clone();
     let tx_for_reader = tx.clone();
     
