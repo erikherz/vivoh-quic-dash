@@ -120,11 +120,11 @@ async fn main() -> Result<(), VqdError> {
         warn!("Crypto provider already installed or failed to install: {:?}", e);
     }
 
-    // Create a channel for media packets
-    let (tx, _) = broadcast::channel(8);
+    // Create a channel for media packets with increased capacity for better buffering
+    let (tx, _) = broadcast::channel(64);
     let connection_ready = Arc::new(AtomicBool::new(false));
 
-    // Initialize the client
+    // Initialize the client with a clone of the sender
     let client = WebTransportClient::new(
         args.server.clone(),
         tx.clone(),
@@ -141,9 +141,19 @@ async fn main() -> Result<(), VqdError> {
         }
     });
 
-    // Spawn a task to handle reading DASH segments
+    // Create a reader task that waits for the connection to be ready
+    let connection_ready_for_reader = connection_ready.clone();
+    let tx_for_reader = tx.clone();
+    
     let reader_handle = tokio::spawn(async move {
-        if let Err(e) = dash_reader.start_reading(tx).await {
+        // Wait for connection to be ready before starting to read
+        info!("DASH reader waiting for WebTransport connection to be established...");
+        while !connection_ready_for_reader.load(Ordering::Relaxed) {
+            sleep(Duration::from_millis(100)).await;
+        }
+        info!("Connection ready, starting to read DASH data");
+        
+        if let Err(e) = dash_reader.start_reading(tx_for_reader).await {
             error!("DASH reader error: {}", e);
         }
     });
