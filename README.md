@@ -1,4 +1,4 @@
-
+STATUS: March 31, 2025: Properly formatted Vivoh WebTransport Media Packets are being created by the publisher and send via the server to the client but the client is not yet parsing and rendering these correctly. I'll work on this more tomorrow.
 Server Command:
 ```
 ./vqd-server --cert cert.pem --key key.pem
