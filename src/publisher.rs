@@ -93,6 +93,9 @@ struct SegmentEntry {
 async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt::init();
 
+    rustls::crypto::CryptoProvider::install_default()
+    .expect("Failed to install default CryptoProvider");
+
     let args = Args::parse();
     info!("Input path: {:?}", args.input);
     info!("Server URL: {}", args.server);  
