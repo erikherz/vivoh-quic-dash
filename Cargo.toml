@@ -59,7 +59,7 @@ hyper-util = { version = "0.1.10", features = ["tokio", "full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 url = "2.5"
 
-# TLS stack
+# TLS & Crypto
 rustls = { version = "0.23" }
 tokio-rustls = "0.26"
 rustls-native-certs = "0.7"

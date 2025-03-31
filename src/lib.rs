@@ -8,6 +8,8 @@
 // WebTransport Media Packet structure
 use bytes::Bytes;
 use quick_xml::de;
+use std::path::PathBuf;
+use clap::Parser;
 
 #[derive(Debug, Clone)]
 pub struct WebTransportMediaPacket {
@@ -19,6 +21,17 @@ pub struct WebTransportMediaPacket {
     pub video_init: Bytes,
     pub audio_data: Bytes,
     pub video_data: Bytes,
+}
+
+#[derive(Debug, Parser, Clone)]
+pub struct Args {
+    /// Input folder containing DASH segments and MPD
+    #[arg(short, long)]
+    pub input: PathBuf,
+
+    /// Server URL to connect via WebTransport (e.g. https://va01.wtmpeg.com)
+    #[arg(short, long)]
+    pub server: Option<String>,
 }
 
 // Shared error type for both publisher and server
@@ -37,6 +50,24 @@ pub enum VqdError {
 
     #[error("Other error: {0}")]
     Other(String),
+}
+
+impl From<url::ParseError> for VqdError {
+    fn from(err: url::ParseError) -> Self {
+        VqdError::Other(err.to_string())
+    }
+}
+
+impl From<std::net::AddrParseError> for VqdError {
+    fn from(err: std::net::AddrParseError) -> Self {
+        VqdError::Other(err.to_string())
+    }
+}
+
+impl From<web_transport_quinn::ClientError> for VqdError {
+    fn from(err: web_transport_quinn::ClientError) -> Self {
+        VqdError::Other(err.to_string())
+    }
 }
 
 // Re-export for shared use
