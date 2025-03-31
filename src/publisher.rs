@@ -13,14 +13,28 @@ use vivoh_quic_dash::{WebTransportMediaPacket, Error, VqdError};
 use bytes::Bytes;
 use quick_xml::de::from_str;
 use serde::Deserialize;
+use url::Url;
+use web_transport_quinn::{Client, Session};
+use quinn::{ClientConfig as QuinnClientConfig, Endpoint};
+use std::sync::Arc;
+use rustls::{ClientConfig as RustlsClientConfig};
+use rustls_native_certs::load_native_certs;
+use rustls::RootCertStore;
+use quinn::crypto::rustls::QuicClientConfig;
+
+
 
 #[derive(Parser, Debug)]
 #[command(name = "vqd-publisher")]
-#[command(about = "Reads DASH output and builds WebTransport Media Packets", long_about = None)]
-struct Args {
-    /// Path to the directory containing DASH output
+#[command(about = "Reads DASH files and sends WebTransport Media Packets")]
+pub struct Args {
+    /// Path to the input directory (containing DASH files)
     #[arg(short, long)]
-    input: PathBuf,
+    pub input: PathBuf,
+
+    /// WebTransport server URL (e.g. https://127.0.0.1:4433)
+    #[arg(short, long)]
+    pub server: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,7 +92,13 @@ struct SegmentEntry {
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt::init();
+
     let args = Args::parse();
+    info!("Input path: {:?}", args.input);
+    info!("Server URL: {}", args.server);  
+
+    let session = connect_to_server(&args.server).await?;
+    info!("Connected to WebTransport server successfully.");     
 
     let mut buffer: VecDeque<WebTransportMediaPacket> = VecDeque::new();
 
@@ -250,3 +270,44 @@ pub fn format_timestamp(ticks: u64, timescale: u32) -> String {
     let ms = millis % 1000;
     format!("{:02}:{:02}:{:02}.{:03}", h, m, s, ms)
 }
+
+fn build_client_config() -> Result<QuinnClientConfig, VqdError> {
+    let mut roots = RootCertStore::empty();
+
+    for cert in load_native_certs().map_err(|e| VqdError::Other(e.to_string()))? {
+        roots.add(cert).map_err(|e| VqdError::Other(format!("Failed to add cert: {:?}", e)))?;
+    }
+
+    let mut client_crypto = RustlsClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+
+    client_crypto.alpn_protocols = vec![b"h3".to_vec()];
+
+    let crypto = QuicClientConfig::try_from(client_crypto)
+        .map_err(|e| VqdError::Other(format!("Crypto config error: {}", e)))?;
+
+    Ok(QuinnClientConfig::new(Arc::new(crypto)))
+}
+
+async fn connect_to_server(server_url: &str) -> Result<Session, VqdError> {
+    let url = Url::parse(server_url).map_err(|e| VqdError::Other(e.to_string()))?;
+    let endpoint = Endpoint::client("[::]:0".parse().unwrap())?;
+
+    let quinn_config = build_client_config()?;
+
+    let client = Client::new(endpoint, quinn_config);
+
+    info!("Connecting to WebTransport server at {}", server_url);
+
+    let session = client.connect(&url).await.map_err(|e| {
+        VqdError::Other(format!("Failed to connect: {e}"))
+    })?;
+
+    info!("WebTransport handshake started...");
+    Ok(session)
+}
+
+
+
+
