@@ -1,4 +1,13 @@
 
+Server Command:
+```
+./vqd-server --cert cert.pem --key key.pem
+```
+
+Publisher Command:
+```
+./vqd-publisher --input /path/to/dash --server https://your.vqd-server.com
+```
 
 Encoder Command:
 ```
