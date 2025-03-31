@@ -110,9 +110,17 @@ impl WebTransportClient {
         let wt_client = Client::new(endpoint, client_config);
         info!("Connecting to WebTransport server at {}", url);
 
-        let session: Session = wt_client.connect(&url).await?;
-        info!("WebTransport session established");
-
+        let session: Session = match wt_client.connect(&url).await {
+            Ok(s) => {
+                info!("✅ WebTransport session established.");
+                s
+            }
+            Err(e) => {
+                error!("❌ Failed to connect: {}", e);
+                return Err(e.into());
+            }
+        };
+        
         self.connection_ready.store(true, Ordering::SeqCst);
         info!("Publisher connection ready");
 
@@ -178,6 +186,8 @@ pub fn serialize_media_packet(packet: &WebTransportMediaPacket) -> bytes::Bytes 
 async fn main() -> Result<(), VqdError> {
     use clap::Parser;
     use vivoh_quic_dash::Args;
+
+    tracing_subscriber::fmt::init();
 
     let args = Args::parse();
     info!("Input path: {:?}", args.input);
