@@ -5,7 +5,6 @@ use web_transport_quinn::{Client, Session};
 use quinn::{ClientConfig as QuinnClientConfig, Endpoint};
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
 use rustls_native_certs::load_native_certs;
-use rustls::crypto::ring;
 use vivoh_quic_dash::{VqdError, WebTransportMediaPacket};
 use std::time::Duration;
 use tracing::{info, debug, error, warn};
@@ -37,10 +36,11 @@ impl WebTransportClient {
     pub async fn run(&self) -> Result<(), VqdError> {
         info!("Starting WebTransport client to publish to {}", self.server_url);
 
-        if let Err(e) = ring::default_provider().install_default() {
+        if let Err(e) = rustls::crypto::ring::default_provider().install_default() {
             warn!("Crypto provider already installed or failed to install: {:?}", e);
         }
 
+        
         let mut retry_count = 0;
 
         loop {
