@@ -2403,6 +2403,8 @@ function handleConnectionClosed() {
             try {
                 if (window.player) {
                     log(`🔍 Player exists, checking if ready`);
+
+                    fixPlaybackIssues();
                     
                     if (window.player.isReady()) {
                         log('▶️ Player is ready, starting playback');
@@ -2951,6 +2953,388 @@ function checkFragmentMetadataDetailed() {
             log(`⚠️ WARNING: Some ${trackType} fragments are missing mdat boxes! This will prevent playback.`);
         }
     });
+}
+
+/**
+ * Add custom DASH.js request interceptor to ensure media segments are properly requested
+ */
+ function addSegmentRequestListener() {
+    // Only add if not already set up
+    if (window.dashSegmentRequestListenerAdded) {
+        return;
+    }
+    
+    log(`🔄 Setting up DASH.js segment request listener`);
+    
+    try {
+        // This assumes window.player is your dash.js player instance
+        if (!window.player) {
+            log(`⚠️ Cannot set up segment request listener - player not initialized`);
+            return;
+        }
+        
+        // Add event listener for segment download attempts
+        window.player.on('fragmentLoadingStarted', function(e) {
+            if (e && e.request) {
+                const request = e.request;
+                log(`🔍 Fragment request started: ${request.url} (type: ${request.mediaType}, time: ${request.startTime})`);
+            }
+        });
+        
+        // Add event listener for segment download completions
+        window.player.on('fragmentLoadingCompleted', function(e) {
+            if (e && e.request) {
+                const request = e.request;
+                log(`✅ Fragment loaded: ${request.url} (type: ${request.mediaType}, size: ${request.bytesLoaded || 'unknown'})`);
+            }
+        });
+        
+        // Add event listener for segment download failures
+        window.player.on('fragmentLoadingFailed', function(e) {
+            if (e && e.request) {
+                log(`❌ Fragment loading failed: ${e.request.url} (${e.error ? e.error.message : 'Unknown error'})`);
+            }
+        });
+        
+        // Mark as added
+        window.dashSegmentRequestListenerAdded = true;
+        
+        log(`✅ DASH.js segment request listener set up successfully`);
+    } catch (error) {
+        log(`❌ Error setting up segment request listener: ${error.message}`);
+    }
+}
+
+/**
+ * Manually trigger media segment requests if they're not being made automatically
+ */
+function triggerSegmentRequests() {
+    log(`🔄 Manually triggering initial segment requests`);
+    
+    try {
+        // First ensure our XHR interception is robust
+        setupXHRInterception();
+        
+        // Make sure we have init segments in our buffer
+        if (!window.packetHandler || 
+            !window.packetHandler.init.video || 
+            !window.packetHandler.init.audio) {
+            log(`⚠️ Cannot trigger segment requests - missing init segments`);
+            return;
+        }
+        
+        // Manually create XMLHttpRequests for init segments
+        log(`🔧 Manually requesting init segments`);
+        
+        // Request video init segment
+        let videoInitRequest = new XMLHttpRequest();
+        videoInitRequest.open('GET', 'init_0.mp4', true);
+        videoInitRequest.responseType = 'arraybuffer';
+        videoInitRequest.onload = function() {
+            if (this.status === 200) {
+                log(`✅ Manual video init segment request successful`);
+                
+                // Now request audio init segment
+                let audioInitRequest = new XMLHttpRequest();
+                audioInitRequest.open('GET', 'init_1.mp4', true);
+                audioInitRequest.responseType = 'arraybuffer';
+                audioInitRequest.onload = function() {
+                    if (this.status === 200) {
+                        log(`✅ Manual audio init segment request successful`);
+                        
+                        // Now request first media segments
+                        requestFirstMediaSegments();
+                    } else {
+                        log(`❌ Manual audio init segment request failed: ${this.status}`);
+                    }
+                };
+                audioInitRequest.onerror = function() {
+                    log(`❌ Manual audio init segment request error`);
+                };
+                audioInitRequest.send();
+            } else {
+                log(`❌ Manual video init segment request failed: ${this.status}`);
+            }
+        };
+        videoInitRequest.onerror = function() {
+            log(`❌ Manual video init segment request error`);
+        };
+        videoInitRequest.send();
+    } catch (error) {
+        log(`❌ Error triggering segment requests: ${error.message}`);
+    }
+}
+
+/**
+ * Request the first few media segments to bootstrap playback
+ */
+function requestFirstMediaSegments() {
+    log(`🔧 Manually requesting first media segments`);
+    
+    // Helper function to request a single segment
+    function requestSegment(trackId, segmentId) {
+        return new Promise((resolve, reject) => {
+            const url = `chunk_${trackId}_${segmentId}.m4s`;
+            let request = new XMLHttpRequest();
+            request.open('GET', url, true);
+            request.responseType = 'arraybuffer';
+            request.onload = function() {
+                if (this.status === 200) {
+                    log(`✅ Manual segment request successful: ${url}`);
+                    resolve(this.response);
+                } else {
+                    log(`❌ Manual segment request failed: ${url} (${this.status})`);
+                    reject(new Error(`Status ${this.status}`));
+                }
+            };
+            request.onerror = function() {
+                log(`❌ Manual segment request error: ${url}`);
+                reject(new Error('Network error'));
+            };
+            request.send();
+        });
+    }
+    
+    // Request the first 3 segments for each track
+    Promise.all([
+        // Video segments (track 0)
+        requestSegment(0, 1),
+        requestSegment(0, 2),
+        requestSegment(0, 3),
+        // Audio segments (track 1)
+        requestSegment(1, 1),
+        requestSegment(1, 2),
+        requestSegment(1, 3)
+    ]).then(() => {
+        log(`✅ Successfully requested initial media segments`);
+        
+        // Now try to start playback
+        if (window.player && document.getElementById('videoElement')) {
+            log(`🎬 Attempting to start playback after manual segment loading`);
+            
+            // Force media source to recognize we have data
+            window.player.seek(0);
+            
+            setTimeout(() => {
+                try {
+                    document.getElementById('videoElement').play()
+                        .then(() => log(`✅ Playback started successfully`))
+                        .catch(e => log(`❌ Error starting playback: ${e.message}`));
+                } catch (e) {
+                    log(`❌ Error attempting to play: ${e.message}`);
+                }
+            }, 1000);
+        }
+    }).catch(error => {
+        log(`❌ Error requesting initial segments: ${error.message}`);
+    });
+}
+
+/**
+ * Check if we're missing init segment handling in the MPD
+ */
+function fixInitSegmentHandling() {
+    // First check if the MPD data is available
+    if (!window.packetHandler || !window.packetHandler.mpdData) {
+        log(`⚠️ Cannot fix MPD - no MPD data available`);
+        return;
+    }
+    
+    // Parse the MPD XML
+    const parser = new DOMParser();
+    const mpd = parser.parseFromString(window.packetHandler.mpdData, 'application/xml');
+    
+    // Find all Representation elements
+    const representations = mpd.querySelectorAll('Representation');
+    let modified = false;
+    
+    // Check if each Representation has an initialization segment
+    for (const representation of representations) {
+        // Check if it already has a SegmentTemplate with initialization
+        const segmentTemplate = representation.querySelector('SegmentTemplate[initialization]');
+        if (!segmentTemplate) {
+            // Get the id or other identifiers to determine track type
+            const id = representation.getAttribute('id') || '';
+            const mimeType = representation.getAttribute('mimeType') || '';
+            const isVideo = mimeType.includes('video') || id.includes('video');
+            const isAudio = mimeType.includes('audio') || id.includes('audio');
+            const trackId = isVideo ? 0 : (isAudio ? 1 : null);
+            
+            if (trackId !== null) {
+                // Create a new SegmentTemplate if it doesn't exist
+                let segTemplate = representation.querySelector('SegmentTemplate') || 
+                                  document.createElement('SegmentTemplate');
+                
+                // Set the initialization attribute
+                segTemplate.setAttribute('initialization', `init_${trackId}.mp4`);
+                
+                // If SegmentTemplate is new, append it to the Representation
+                if (!representation.querySelector('SegmentTemplate')) {
+                    representation.appendChild(segTemplate);
+                }
+                
+                modified = true;
+                log(`🔧 Added initialization segment reference for track ${trackId}`);
+            }
+        }
+    }
+    
+    if (modified) {
+        // Serialize the modified MPD back to string
+        const serializer = new XMLSerializer();
+        const modifiedMpdString = serializer.serializeToString(mpd);
+        
+        // Update the MPD data
+        window.packetHandler.mpdData = modifiedMpdString;
+        
+        // Create a new blob URL
+        const blob = new Blob([modifiedMpdString], { type: 'application/dash+xml' });
+        const oldUrl = window.packetHandler.mpdUrl;
+        window.packetHandler.mpdUrl = URL.createObjectURL(blob);
+        
+        // Register the new MPD blob URL
+        if (typeof window.registerMpdBlobUrl === 'function') {
+            window.registerMpdBlobUrl(window.packetHandler.mpdUrl, modifiedMpdString);
+        }
+        
+        // Revoke the old blob URL if it's a blob URL
+        if (oldUrl && oldUrl.startsWith('blob:')) {
+            try {
+                URL.revokeObjectURL(oldUrl);
+            } catch (e) {
+                // Ignore errors during cleanup
+            }
+        }
+        
+        log(`✅ Modified MPD to include initialization segment references`);
+        return true;
+    } else {
+        log(`ℹ️ No MPD modifications needed for initialization segments`);
+        return false;
+    }
+}
+
+/**
+ * Fix media source configuration to ensure proper playback
+ */
+function fixMediaSourceConfiguration() {
+    log(`🔧 Attempting to fix MediaSource configuration`);
+    
+    try {
+        // First ensure we have a player and video element
+        if (!window.player || !document.getElementById('videoElement')) {
+            log(`⚠️ Cannot fix MediaSource - player or video element not found`);
+            return false;
+        }
+        
+        // Reset the DASH.js player with optimized settings
+        window.player.updateSettings({
+            'streaming': {
+                'buffer': {
+                    'fastSwitchEnabled': true,
+                    'bufferTimeDefault': 8,          // Lower buffer requirements
+                    'bufferTimeAtTopQuality': 12,    // Lower buffer requirements
+                    'bufferPruningInterval': 4,      // More frequent pruning
+                    'stableBufferTime': 8,           // Maintain reasonable buffer
+                    'abandonLoadTimeout': 8000       // Longer timeout for segment loading
+                },
+                'gaps': {
+                    'jumpGaps': true,
+                    'jumpLargeGaps': true,
+                    'smallGapLimit': 1.5,
+                    'threshold': 0.3
+                },
+                'delay': {
+                    'liveDelay': 3,
+                    'useSuggestedPresentationDelay': false
+                },
+                'liveCatchup': {
+                    'enabled': false,              // Disable catchup for VOD content
+                },
+                'lastBitrateCachingInfo': {
+                    'enabled': false
+                },
+                'lastMediaSettingsCachingInfo': {
+                    'enabled': false
+                },
+                'cacheLoadThresholds': {
+                    'video': 0,
+                    'audio': 0
+                }
+            },
+            'debug': {
+                'logLevel': dashjs.Debug.LOG_LEVEL_DEBUG
+            }
+        });
+        
+        // Modify manifest URL to ensure we get a refresh
+        if (window.packetHandler && window.packetHandler.mpdUrl) {
+            // Update MPD if needed
+            const mpdModified = fixInitSegmentHandling();
+            
+            if (mpdModified) {
+                log(`🔄 Resetting player with modified MPD: ${window.packetHandler.mpdUrl}`);
+                
+                // Reset player state
+                const videoElement = document.getElementById('videoElement');
+                try {
+                    // Stop any ongoing playback
+                    videoElement.pause();
+                    
+                    // Reset the player with the updated MPD
+                    window.player.attachSource(window.packetHandler.mpdUrl);
+                    
+                    // Add a delay before attempting to play
+                    setTimeout(() => {
+                        try {
+                            // Force MediaSource to recognize we have data
+                            window.player.seek(0);
+                            
+                            // Trigger segment requests after a short delay
+                            setTimeout(() => {
+                                triggerSegmentRequests();
+                            }, 500);
+                        } catch (e) {
+                            log(`❌ Error during seek/play attempt: ${e.message}`);
+                        }
+                    }, 1000);
+                    
+                    return true;
+                } catch (e) {
+                    log(`❌ Error resetting player: ${e.message}`);
+                }
+            } else {
+                // Just trigger segment requests
+                triggerSegmentRequests();
+            }
+        } else {
+            log(`⚠️ No MPD URL available to reset player`);
+        }
+    } catch (error) {
+        log(`❌ Error fixing MediaSource configuration: ${error.message}`);
+    }
+    
+    return false;
+}
+
+/**
+ * Main function to fix the video playback issues
+ */
+function fixPlaybackIssues() {
+    log(`🛠️ Starting playback issue fixing procedure`);
+    
+    // Step 1: Add segment request listener
+    addSegmentRequestListener();
+    
+    // Step 2: Check and fix MPD/init segment handling
+    fixMediaSourceConfiguration();
+    
+    // Update UI
+    if (typeof updateUI === 'function') {
+        updateUI();
+    }
+    
+    log(`🛠️ Playback issue fixing procedure completed`);
 }
 
 /**
