@@ -3149,53 +3149,31 @@ function handleConnectionClosed() {
         });
     }
 
-// Enhanced Play button handler with robust error recovery
+// Enhanced Play button handler with streamlined startup
 const playButton = document.getElementById('playButton');
 if (playButton) {
     playButton.addEventListener('click', async () => {
         log(`🔍 Play button clicked`);
         
         try {
-            // Check if basic requirements are met
-            if (!window.packetHandler) {
-                log(`❌ No packet handler available - connect to server first`);
-                alert("Please connect to the server first before attempting playback.");
-                return;
-            }
-            
-            // Check media availability
-            const stats = window.packetHandler.getStats();
-            if (!stats.videoInitAvailable || !stats.audioInitAvailable) {
-                log(`⚠️ Missing initialization segments: video=${stats.videoInitAvailable}, audio=${stats.audioInitAvailable}`);
-                alert("Still waiting for media initialization data. Please wait a moment and try again.");
-                return;
-            }
-            
-            if (stats.videoFragments < 3 || stats.audioFragments < 3) {
-                log(`⚠️ Not enough media fragments: video=${stats.videoFragments}, audio=${stats.audioFragments}`);
-                alert("Still buffering initial media fragments. Please wait a moment.");
-                return;
-            }
-            
-            // Update state
+            // Reset player state
             window.playerState = 'initializing';
             updateUI();
             
-            // 1. First ensure XHR interception is properly set up
+            // First ensure XHR interception is properly set up
             enhanceXHRForMediaSegments();
             
-            // 2. If player already exists, attempt to reset
+            // Reset any existing player
             if (window.player) {
-                log(`🔄 Resetting existing player`);
                 try {
                     window.player.reset();
+                    window.player = null;
                 } catch (e) {
                     log(`⚠️ Error resetting player: ${e.message}`);
                 }
             }
             
-            // 3. Create or recreate player
-            log(`🎬 Setting up DASH.js player`);
+            // Get necessary elements
             const videoElement = document.getElementById('videoElement');
             if (!videoElement) {
                 log(`❌ Video element not found`);
@@ -3203,42 +3181,49 @@ if (playButton) {
                 return;
             }
             
-            // Pause any current playback
+            // Reset video element state
             videoElement.pause();
+            videoElement.removeAttribute('src');
+            videoElement.load();
             
-            // Create and configure player
+            // Ensure we have required media components
+            if (!window.packetHandler) {
+                log(`❌ No packet handler available`);
+                alert("Error: No media data available. Please connect first.");
+                return;
+            }
+            
+            const stats = window.packetHandler.getStats();
+            if (!stats.videoInitAvailable || !stats.audioInitAvailable || !stats.mpdAvailable) {
+                log(`⚠️ Missing required media components: video=${stats.videoInitAvailable}, audio=${stats.audioInitAvailable}, mpd=${stats.mpdAvailable}`);
+                alert("Still waiting for media initialization data. Please wait a moment.");
+                return;
+            }
+            
+            // Create a fresh player instance with minimal configuration
+            log(`🎬 Creating fresh DASH.js player instance`);
             window.player = dashjs.MediaPlayer().create();
             
-            // Apply optimized settings
+            // Use minimal buffering for faster startup
             window.player.updateSettings({
-                'debug': {
-                    'logLevel': dashjs.Debug.LOG_LEVEL_DEBUG
-                },
                 'streaming': {
                     'buffer': {
                         'fastSwitchEnabled': true,
                         'bufferTimeDefault': 2,
-                        'bufferTimeAtTopQuality': 5,
                         'stableBufferTime': 2
                     },
                     'gaps': {
-                        'jumpGaps': true,
-                        'jumpLargeGaps': true,
-                        'smallGapLimit': 1.0
-                    },
-                    'abr': {
-                        'initialBitrate': {
-                            'audio': -1,
-                            'video': -1
-                        }
+                        'jumpGaps': true
                     }
+                },
+                'debug': {
+                    'logLevel': dashjs.Debug.LOG_LEVEL_WARNING
                 }
             });
             
-            // Set up event handlers
+            // Set up minimal event handlers
             window.player.on(dashjs.MediaPlayer.events.ERROR, (e) => {
-                let errorMsg = e.error ? (e.error.message || 'Unknown error') : 'Unknown error';
-                log(`❌ Player error: ${errorMsg}`);
+                log(`❌ Player error: ${e.error ? e.error.message : 'Unknown error'}`);
                 window.playerState = 'error';
                 updateUI();
             });
@@ -3246,12 +3231,6 @@ if (playButton) {
             window.player.on(dashjs.MediaPlayer.events.PLAYBACK_STARTED, () => {
                 log(`▶️ Playback started successfully`);
                 window.playerState = 'playing';
-                updateUI();
-            });
-            
-            window.player.on(dashjs.MediaPlayer.events.PLAYBACK_PAUSED, () => {
-                log(`⏸️ Playback paused`);
-                window.playerState = 'paused';
                 updateUI();
             });
             
@@ -3267,107 +3246,135 @@ if (playButton) {
                 }
             });
             
-            window.player.on(dashjs.MediaPlayer.events.MANIFEST_LOADED, () => {
-                log(`📄 Manifest loaded successfully`);
-                
-                // Manually request initialization segments to ensure they're loaded
-                setTimeout(() => {
-                    log(`🔄 Manually requesting initialization segments and media fragments`);
-                    
-                    // Request video init segment
-                    let videoInitRequest = new XMLHttpRequest();
-                    videoInitRequest.open('GET', 'init_0.mp4', true);
-                    videoInitRequest.responseType = 'arraybuffer';
-                    videoInitRequest.send();
-                    
-                    // Request audio init segment
-                    let audioInitRequest = new XMLHttpRequest();
-                    audioInitRequest.open('GET', 'init_1.mp4', true);
-                    audioInitRequest.responseType = 'arraybuffer';
-                    audioInitRequest.send();
-                    
-                    // Request first few video segments
-                    for (let i = 1; i <= 3; i++) {
-                        let req = new XMLHttpRequest();
-                        req.open('GET', `chunk_0_${i}.m4s`, true);
-                        req.responseType = 'arraybuffer';
-                        req.send();
-                    }
-                    
-                    // Request first few audio segments
-                    for (let i = 1; i <= 3; i++) {
-                        let req = new XMLHttpRequest();
-                        req.open('GET', `chunk_1_${i}.m4s`, true);
-                        req.responseType = 'arraybuffer';
-                        req.send();
-                    }
-                    
-                    log(`✅ Segment requests initiated`);
-                }, 500);
+            // Add special handler for source buffer updates
+            window.player.on(dashjs.MediaPlayer.events.BUFFER_APPENDED, (e) => {
+                log(`📊 Buffer appended: type=${e.mediaType}, size=${e.bytes}, time=${e.start.toFixed(2)}-${(e.start+e.end).toFixed(2)}`);
             });
             
-            // Initialize with MPD URL
-            if (!window.packetHandler.mpdUrl) {
-                log(`❌ No MPD URL available`);
-                alert("Error: No MPD manifest available for playback.");
-                return;
-            }
-            
-            // 4. Initialize the player
+            // Initialize player with MPD
             log(`🎬 Initializing player with MPD: ${window.packetHandler.mpdUrl}`);
             window.player.initialize(videoElement, window.packetHandler.mpdUrl, false);
             
-            // 5. Attempt playback after player initialization and manual segment loading
-            setTimeout(async () => {
-                try {
-                    log(`▶️ Attempting to start playback`);
+            // Pre-fetch segments to ensure they're ready
+            setTimeout(() => {
+                log(`🔄 Pre-fetching media segments`);
+                
+                // Force the init segments to be loaded
+                let videoInitRequest = new XMLHttpRequest();
+                videoInitRequest.open('GET', 'init_0.mp4', true);
+                videoInitRequest.responseType = 'arraybuffer';
+                videoInitRequest.send();
+                
+                let audioInitRequest = new XMLHttpRequest();
+                audioInitRequest.open('GET', 'init_1.mp4', true);
+                audioInitRequest.responseType = 'arraybuffer';
+                audioInitRequest.send();
+                
+                // Load the first two segments for both audio and video
+                for (let i = 1; i <= 2; i++) {
+                    let videoSegment = new XMLHttpRequest();
+                    videoSegment.open('GET', `chunk_0_${i}.m4s`, true);
+                    videoSegment.responseType = 'arraybuffer';
+                    videoSegment.send();
                     
-                    // Force seeking to start of content
-                    videoElement.currentTime = 0;
-                    
-                    // Unmute if needed for autoplay policies
-                    if (videoElement.muted) {
-                        videoElement.muted = false;
-                    }
-                    
-                    // Attempt to play
-                    await videoElement.play();
-                    log(`✅ Playback initiated successfully`);
-                    window.playerState = 'playing';
-                    updateUI();
-                    
-                    // Add playback recovery monitoring
-                    startPlaybackMonitoring();
-                } catch (error) {
-                    log(`❌ Error starting playback: ${error.message}`);
-                    
-                    // Try one more time with muted playback (for autoplay policy)
-                    try {
-                        log(`🔄 Retrying with muted playback`);
-                        videoElement.muted = true;
-                        await videoElement.play();
-                        log(`✅ Muted playback initiated successfully`);
-                        window.playerState = 'playing';
-                        updateUI();
-                        
-                        // Add recovery monitoring
-                        startPlaybackMonitoring();
-                    } catch (innerError) {
-                        log(`❌ Muted playback also failed: ${innerError.message}`);
-                        window.playerState = 'error';
-                        updateUI();
-                        alert("Playback failed. Please try again or reconnect to the server.");
-                    }
+                    let audioSegment = new XMLHttpRequest();
+                    audioSegment.open('GET', `chunk_1_${i}.m4s`, true);
+                    audioSegment.responseType = 'arraybuffer';
+                    audioSegment.send();
                 }
-            }, 2000);
-            
+                
+                // Wait for segments to load, then attempt playback
+                setTimeout(() => {
+                    try {
+                        log(`▶️ Starting playback with 1s initial seek`);
+                        
+                        // Force seeking to 1 second to skip any initialization issues
+                        videoElement.currentTime = 1;
+                        
+                        // Ensure video is unmuted (for autoplay policies)
+                        if (videoElement.muted) {
+                            videoElement.muted = false;
+                        }
+                        
+                        // Explicitly request the DASH player to play 
+                        window.player.play();
+                        
+                        // Add backup direct play attempt with autoplay fallback
+                        videoElement.play()
+                            .then(() => log(`✅ Playback started successfully`))
+                            .catch(e => {
+                                log(`⚠️ Play error: ${e.message}, trying with muted autoplay`);
+                                videoElement.muted = true;
+                                videoElement.play()
+                                    .then(() => log(`✅ Muted playback started successfully`))
+                                    .catch(e2 => log(`❌ Muted playback also failed: ${e2.message}`));
+                            });
+                        
+                        // Start monitoring buffer health
+                        startBufferMonitoring();
+                    } catch (e) {
+                        log(`❌ Error starting playback: ${e.message}`);
+                    }
+                }, 2000);
+            }, 1000);
         } catch (error) {
             log(`❌ Error in Play button handler: ${error.message}`);
-            window.playerState = 'error';
-            updateUI();
-            alert(`Playback error: ${error.message}`);
         }
     });
+}
+
+// Monitor buffer health and recover if needed
+function startBufferMonitoring() {
+    if (window.bufferMonitorInterval) {
+        clearInterval(window.bufferMonitorInterval);
+    }
+    
+    window.bufferMonitorInterval = setInterval(() => {
+        if (!window.player) {
+            clearInterval(window.bufferMonitorInterval);
+            return;
+        }
+        
+        const videoElement = document.getElementById('videoElement');
+        if (!videoElement) return;
+        
+        try {
+            // Check if we're still buffering after a long time
+            if (window.playerState === 'buffering' && videoElement.readyState === 0) {
+                log(`⚠️ Still in buffering state, no data available. Attempting recovery...`);
+                
+                // Reset the MediaSource
+                window.player.attachSource(window.packetHandler.mpdUrl);
+                
+                // Try to load segments again
+                setTimeout(() => {
+                    for (let i = 1; i <= 3; i++) {
+                        let videoSegment = new XMLHttpRequest();
+                        videoSegment.open('GET', `chunk_0_${i}.m4s`, true);
+                        videoSegment.responseType = 'arraybuffer';
+                        videoSegment.send();
+                        
+                        let audioSegment = new XMLHttpRequest();
+                        audioSegment.open('GET', `chunk_1_${i}.m4s`, true);
+                        audioSegment.responseType = 'arraybuffer';
+                        audioSegment.send();
+                    }
+                    
+                    // Try to start playback again
+                    setTimeout(() => {
+                        videoElement.currentTime = 0;
+                        videoElement.play()
+                            .catch(() => {
+                                videoElement.muted = true;
+                                videoElement.play().catch(() => {});
+                            });
+                    }, 1000);
+                }, 500);
+            }
+        } catch (e) {
+            log(`⚠️ Error in buffer monitoring: ${e.message}`);
+        }
+    }, 5000);
 }
 
 /**
