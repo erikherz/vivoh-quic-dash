@@ -408,8 +408,8 @@ pub fn format_timestamp(ticks: u64, timescale: u32) -> String {
 
 struct DashReader {
     input_dir: PathBuf,
-    audio_init: Bytes,
-    video_init: Bytes,
+    audio_init: Option<Bytes>,
+    video_init: Option<Bytes>,
     packet_id: u32,
     seen_segments: HashSet<u32>,
     seen_queue: VecDeque<u32>,
@@ -417,33 +417,148 @@ struct DashReader {
 
 impl DashReader {
     async fn new(input_dir: PathBuf) -> Result<Self, VqdError> {
-        let audio_init = read_file(input_dir.join("init-1.mp4"))?;
-        let video_init = read_file(input_dir.join("init-0.mp4"))?;
 
         Ok(Self {
             input_dir,
-            audio_init,
-            video_init,
+            audio_init: None,
+            video_init: None,
             packet_id: 0,
             seen_segments: HashSet::new(),
             seen_queue: VecDeque::new(),
         })
     }
 
+    async fn ensure_init_files_loaded(&mut self) -> Result<bool, VqdError> {
+        let audio_init_path = self.input_dir.join("init-1.mp4");
+        let video_init_path = self.input_dir.join("init-0.mp4");
+        
+        // Check if files exist
+        if !audio_init_path.exists() || !video_init_path.exists() {
+            warn!("Initialization files missing. Audio: {}, Video: {}", 
+                  audio_init_path.exists(), video_init_path.exists());
+            return Ok(false);
+        }
+        
+        // If we already have the init segments, no need to read again
+        if self.audio_init.is_some() && self.video_init.is_some() {
+            return Ok(true);
+        }
+        
+        // Read initialization files
+        match read_file(audio_init_path) {
+            Ok(data) => self.audio_init = Some(data),
+            Err(e) => {
+                error!("Failed to read audio init file: {}", e);
+                return Ok(false);
+            }
+        }
+        
+        match read_file(video_init_path) {
+            Ok(data) => self.video_init = Some(data),
+            Err(e) => {
+                error!("Failed to read video init file: {}", e);
+                return Ok(false);
+            }
+        }
+        
+        info!("Successfully loaded initialization files");
+        Ok(true)
+    }
+
     async fn start_reading(mut self, tx: broadcast::Sender<WebTransportMediaPacket>) -> Result<(), VqdError> {
         const MAX_SEEN: usize = 10;
+        let mut mpd_logged = false; 
         
         loop {
 
-            // Check if channel is still open before trying to send
             if tx.receiver_count() == 0 {
                 warn!("No receivers listening, waiting...");
                 sleep(Duration::from_secs(1)).await;
                 continue;
             }
+            
+            // Ensure init files are loaded
+            if !self.ensure_init_files_loaded().await? {
+                warn!("Waiting for initialization files...");
+                sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+
+            // Required files: MPD, plus audio and video init segments
+            let mpd_path = self.input_dir.join("stream.mpd");
+            
+            // Make sure MPD file exists before proceeding
+            if !mpd_path.exists() {
+                warn!("Required MPD file missing: {}", mpd_path.display());
+                sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+
+            // Find available segment numbers
+            let segment_numbers = match find_common_segments(&self.input_dir) {
+                Ok(segments) => {
+                    if segments.is_empty() {
+                        warn!("No common audio/video segments found, waiting...");
+                        sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                    segments
+                },
+                Err(e) => {
+                    error!("Failed to find common segments: {}", e);
+                    sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+                
+            // Validate that at least one pair of segment files exists
+            let next_segment = match segment_numbers.iter().find(|&n| !self.seen_segments.contains(n)) {
+                Some(&n) => n,
+                None => {
+                    debug!("No new segments found, waiting...");
+                    sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+            
+            // Check if both audio and video files exist for this segment
+            let audio_path = self.input_dir.join(format!("chunk-1-{:05}.m4s", next_segment));
+            let video_path = self.input_dir.join(format!("chunk-0-{:05}.m4s", next_segment));
+            
+            if !audio_path.exists() || !video_path.exists() {
+                warn!("Incomplete segment pair for segment {}: audio exists: {}, video exists: {}", 
+                    next_segment, audio_path.exists(), video_path.exists());
+                sleep(Duration::from_secs(1)).await;
+                continue;
+            }
 
             let mpd = match read_file(self.input_dir.join("stream.mpd")) {
-                Ok(data) => data,
+                Ok(data) => {
+                    // Add this code to log the MPD content once
+                    if !mpd_logged {
+                        match std::str::from_utf8(&data) {
+                            Ok(mpd_str) => {
+                                debug!("MPD Content (first 500 chars):\n{}", 
+                                       &mpd_str[..std::cmp::min(mpd_str.len(), 500)]);
+                                
+                                // Check if it's a valid MPD
+                                if !mpd_str.trim_start().starts_with("<?xml") && 
+                                   !mpd_str.trim_start().starts_with("<MPD") {
+                                    warn!("MPD content doesn't appear to be valid XML/MPD");
+                                }
+                                
+                                debug!("Full MPD size: {} bytes", data.len());
+                            },
+                            Err(e) => {
+                                warn!("MPD content is not valid UTF-8: {}", e);
+                                debug!("MPD binary content (first 32 bytes): {:?}", 
+                                      &data[..std::cmp::min(data.len(), 32)]);
+                            }
+                        }
+                        mpd_logged = true;
+                    }
+                    data
+                },
                 Err(e) => {
                     error!("Failed to read MPD file: {}", e);
                     sleep(Duration::from_secs(1)).await;
@@ -494,16 +609,16 @@ impl DashReader {
                     }
                 };
             
-                let mut wmp = WebTransportMediaPacket {
-                    packet_id: self.packet_id,
-                    timestamp: 0,
-                    duration: 0,
-                    mpd: mpd.clone(),
-                    audio_init: self.audio_init.clone(),
-                    video_init: self.video_init.clone(),
-                    audio_data,
-                    video_data,
-                };
+            let mut wmp = WebTransportMediaPacket {
+                packet_id: self.packet_id,
+                timestamp: 0,
+                duration: 0,
+                mpd: mpd.clone(),
+                audio_init: self.audio_init.clone().unwrap(),
+                video_init: self.video_init.clone().unwrap(),
+                audio_data,
+                video_data,
+            };
             
                 let mpd_str = match std::str::from_utf8(&mpd) {
                     Ok(s) => s,
