@@ -1384,122 +1384,6 @@ function logPlayerDebugInfo() {
   }
 }
 
-function setupDashPlayer(mpdUrl = '/vivoh.mpd') {
-    if (window.player) {
-        log(`📝 Player already exists, skipping creation`);
-        return window.player;
-    }
-
-    try {
-        log(`🎬 Creating DASH.js player (URL: ${mpdUrl})`);
-        
-        // Ensure video element exists
-        let videoElement = document.getElementById('videoElement');
-        if (!videoElement) {
-            log(`🎥 Creating <video id="videoElement">`);
-            videoElement = document.createElement('video');
-            videoElement.id = 'videoElement';
-            videoElement.controls = true;
-            videoElement.autoplay = true;
-            videoElement.muted = true; // Required for autoplay
-            
-            const container = document.querySelector('.video-container');
-            if (container) {
-                container.innerHTML = '';
-                container.appendChild(videoElement);
-            } else {
-                document.body.appendChild(videoElement);
-            }
-        }
-        
-        // Create player with enhanced settings
-        window.player = dashjs.MediaPlayer().create();
-        player = window.player;
-        
-        // Apply more tolerant streaming settings
-        window.player.updateSettings({
-            'streaming': {
-                'buffer': {
-                    'fastSwitchEnabled': true,
-                    'stableBufferTime': 2, // Increased from 1 to 2
-                    'bufferTimeAtTopQuality': 2, // Increased from 1 to 2
-                    'bufferPruningInterval': 1 // Increased from 0.5 to 1
-                },
-                'liveCatchup': {
-                    'enabled': true,
-                    'maxDrift': 0.5, // Increased from 0.2 to 0.5
-                    'playbackRate': {
-                        'min': 0.5, // Changed from 0.8 to be more tolerant
-                        'max': 1.2
-                    }
-                },
-                'jumpGaps': true, // Added to handle gaps better
-                'smallGapLimit': 1.5, // Helps with gap jumping
-                'lowLatencyEnabled': true
-            }
-        });
-        
-        // Add enhanced error handling
-        window.player.on(dashjs.MediaPlayer.events.ERROR, (e) => {
-            let errorDetail = '';
-            if (e.error) {
-                errorDetail = e.error.message || '';
-                if (e.error.data) {
-                    errorDetail += ` (${JSON.stringify(e.error.data)})`;
-                }
-            }
-            log(`❌ Player error: ${errorDetail || 'Unknown error'}`);
-            
-            // Attempt recovery for certain errors
-            if (errorDetail.includes('CHUNK_DEMUXER_ERROR_APPEND_FAILED')) {
-                log(`⚙️ Attempting recovery from fragment error`);
-                playerState = 'error';
-                window.playerState = 'error';
-                updateUI();
-                
-                // For severe errors, wait and reset the player
-                setTimeout(() => {
-                    try {
-                        if (window.player) {
-                            window.player.reset();
-                            setupDashPlayer(mpdUrl);
-                        }
-                    } catch (err) {
-                        log(`⚠️ Error during player reset: ${err.message}`);
-                    }
-                }, 2000);
-            }
-        });
-        
-        window.player.on(dashjs.MediaPlayer.events.FRAGMENT_LOADING_COMPLETED, (e) => {
-            log(`✅ Fragment loaded: type=${e.request.mediaType}, time=${e.request.startTime}`);
-        });
-        
-        // Add additional success event tracking
-        window.player.on(dashjs.MediaPlayer.events.PLAYBACK_STARTED, () => {
-            log(`▶️ Playback started successfully`);
-            playerState = 'playing';
-            window.playerState = 'playing';
-            updateUI();
-        });
-        
-        // Initialize player
-        window.player.initialize(videoElement, mpdUrl, true); // Autoplay
-        log(`🎬 DASH.js player initialized with MPD URL: ${mpdUrl}`);
-        
-        playerState = 'buffering';
-        window.playerState = playerState;
-        updateUI();
-        
-        return window.player;
-    } catch (error) {
-        log(`❌ Error creating DASH.js player: ${error.message}`);
-        window.player = null;
-        player = null;
-        return null;
-    }
-}
-
 // Helper to check if data already has MP4 structure
 function hasMP4Structure(data) {
   try {
@@ -2610,21 +2494,26 @@ function setupDashPlayer(mpdUrl = '/vivoh.mpd') {
             'streaming': {
                 'buffer': {
                     'fastSwitchEnabled': true,
-                    'stableBufferTime': 5,
-                    'bufferTimeAtTopQuality': 5,
-                    'bufferPruningInterval': 5
+                    'bufferTimeDefault': 20,           // Replaces stableBufferTime
+                    'bufferTimeAtTopQuality': 30,
+                    'bufferPruningInterval': 10
                 },
-                'liveCatchup': {
+                'gaps': {                              // Replaces jumpGaps and smallGapLimit
+                    'jumpGaps': true,
+                    'smallGapLimit': 1.5
+                },
+                'delay': {                             // Part of low latency settings
+                    'liveDelay': 3,
+                    'useSuggestedPresentationDelay': true
+                },
+                'liveCatchup': {                       // For low latency streams
                     'enabled': true,
-                    'maxDrift': 1,
+                    'maxDrift': 0.5,
                     'playbackRate': {
                         'min': 0.5,
                         'max': 1.5
                     }
-                },
-                'jumpGaps': true,
-                'smallGapLimit': 1.5,
-                'lowLatencyEnabled': true
+                }
             }
         });
         
