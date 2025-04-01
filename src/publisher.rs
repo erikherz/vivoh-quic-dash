@@ -432,6 +432,7 @@ impl DashReader {
 
     async fn start_reading(mut self, tx: broadcast::Sender<WebTransportMediaPacket>) -> Result<(), VqdError> {
         const MAX_SEEN: usize = 10;
+        let mut mpd_logged = false; 
         
         loop {
 
@@ -442,8 +443,81 @@ impl DashReader {
                 continue;
             }
 
+                // Required files: MPD, plus audio and video init segments
+                let mpd_path = self.input_dir.join("stream.mpd");
+                
+                // Make sure all required files exist before proceeding
+                if !mpd_path.exists() {
+                    warn!("Required MPD file missing: {}", mpd_path.display());
+                    sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+
+                // Find available segment numbers
+                let segment_numbers = match find_common_segments(&self.input_dir) {
+                    Ok(segments) => {
+                        if segments.is_empty() {
+                            warn!("No common audio/video segments found, waiting...");
+                            sleep(Duration::from_secs(1)).await;
+                            continue;
+                        }
+                        segments
+                    },
+                    Err(e) => {
+                        error!("Failed to find common segments: {}", e);
+                        sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                };
+                
+                // Validate that at least one pair of segment files exists
+                let next_segment = match segment_numbers.iter().find(|&n| !self.seen_segments.contains(n)) {
+                    Some(&n) => n,
+                    None => {
+                        debug!("No new segments found, waiting...");
+                        sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                };
+                
+                // Check if both audio and video files exist for this segment
+                let audio_path = self.input_dir.join(format!("chunk-1-{:05}.m4s", next_segment));
+                let video_path = self.input_dir.join(format!("chunk-0-{:05}.m4s", next_segment));
+                
+                if !audio_path.exists() || !video_path.exists() {
+                    warn!("Incomplete segment pair for segment {}: audio exists: {}, video exists: {}", 
+                        next_segment, audio_path.exists(), video_path.exists());
+                    sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+
             let mpd = match read_file(self.input_dir.join("stream.mpd")) {
-                Ok(data) => data,
+                Ok(data) => {
+                    // Add this code to log the MPD content once
+                    if !mpd_logged {
+                        match std::str::from_utf8(&data) {
+                            Ok(mpd_str) => {
+                                debug!("MPD Content (first 500 chars):\n{}", 
+                                       &mpd_str[..std::cmp::min(mpd_str.len(), 500)]);
+                                
+                                // Check if it's a valid MPD
+                                if !mpd_str.trim_start().starts_with("<?xml") && 
+                                   !mpd_str.trim_start().starts_with("<MPD") {
+                                    warn!("MPD content doesn't appear to be valid XML/MPD");
+                                }
+                                
+                                debug!("Full MPD size: {} bytes", data.len());
+                            },
+                            Err(e) => {
+                                warn!("MPD content is not valid UTF-8: {}", e);
+                                debug!("MPD binary content (first 32 bytes): {:?}", 
+                                      &data[..std::cmp::min(data.len(), 32)]);
+                            }
+                        }
+                        mpd_logged = true;
+                    }
+                    data
+                },
                 Err(e) => {
                     error!("Failed to read MPD file: {}", e);
                     sleep(Duration::from_secs(1)).await;
