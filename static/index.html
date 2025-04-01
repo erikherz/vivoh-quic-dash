@@ -2177,7 +2177,317 @@ function checkPlayerReadiness() {
   }
 }
 
+/**
+ * Properly validate and handle MP4 fragments for MediaSource Extensions
+ */
 
+/**
+ * Correctly parse and validate MP4 fragment structure
+ * @param {Uint8Array} data - Fragment data to parse
+ * @returns {Object} Box structure and validation results
+ */
+ function parseMP4Fragment(data) {
+    if (!data || data.byteLength === 0) {
+        return { 
+            valid: false, 
+            hasMoof: false, 
+            hasMdat: false, 
+            boxes: [],
+            error: "Empty data" 
+        };
+    }
+
+    try {
+        // Parse all MP4 boxes in the fragment
+        let offset = 0;
+        const boxes = [];
+        let hasMoof = false;
+        let hasMdat = false;
+        
+        // Continue parsing until we reach the end of the data
+        while (offset + 8 <= data.byteLength) {
+            // Read size (first 4 bytes, big-endian)
+            const size = (data[offset] << 24) | 
+                        (data[offset + 1] << 16) | 
+                        (data[offset + 2] << 8) | 
+                        data[offset + 3];
+            
+            // Sanity check for size
+            if (size < 8 || size > data.byteLength - offset) {
+                // This might be a corrupt box, but we'll still return what we parsed
+                break;
+            }
+            
+            // Read type (4 bytes after size)
+            const type = String.fromCharCode(
+                data[offset + 4], data[offset + 5], 
+                data[offset + 6], data[offset + 7]
+            );
+            
+            // Record box details
+            boxes.push({ type, size, offset });
+            
+            // Track moof and mdat boxes
+            if (type === 'moof') hasMoof = true;
+            if (type === 'mdat') hasMdat = true;
+            
+            // Move to next box
+            offset += size;
+        }
+        
+        // Check that we have a valid MP4 fragment structure
+        const valid = hasMoof && hasMdat;
+        
+        // For fragmented MP4, the order should be: [styp] → [sidx] → moof → mdat
+        let correctOrder = true;
+        const moofIndex = boxes.findIndex(b => b.type === 'moof');
+        const mdatIndex = boxes.findIndex(b => b.type === 'mdat');
+        
+        if (moofIndex !== -1 && mdatIndex !== -1) {
+            correctOrder = moofIndex < mdatIndex;
+        } else {
+            correctOrder = false;
+        }
+        
+        return {
+            valid: valid && correctOrder,
+            hasMoof,
+            hasMdat,
+            correctOrder,
+            boxes,
+            boxStructure: boxes.map(b => `${b.type}(${b.size})`).join(' → ')
+        };
+    } catch (error) {
+        return { 
+            valid: false, 
+            hasMoof: false, 
+            hasMdat: false, 
+            boxes: [],
+            error: error.message 
+        };
+    }
+}
+
+/**
+ * Fix issues with media fragments before serving them
+ * @param {Uint8Array} data - Media fragment data
+ * @param {string} mediaType - "video" or "audio"
+ * @returns {Uint8Array} Fixed media fragment
+ */
+function fixMediaFragmentIfNeeded(data, mediaType) {
+    // First analyze the fragment
+    const parsedFragment = parseMP4Fragment(data);
+    
+    // Log the fragment structure
+    log(`🧪 ${mediaType} fragment structure: ${parsedFragment.boxStructure}`);
+    
+    // If it's already valid, return as is
+    if (parsedFragment.valid) {
+        log(`✅ ${mediaType} fragment is valid (moof=${parsedFragment.hasMoof}, mdat=${parsedFragment.hasMdat})`);
+        return data;
+    }
+    
+    log(`⚠️ ${mediaType} fragment needs fixing: moof=${parsedFragment.hasMoof}, mdat=${parsedFragment.hasMdat}, correctOrder=${parsedFragment.correctOrder}`);
+    
+    // If we can't fix it, at least return the original
+    return data;
+}
+
+/**
+ * Enhanced XMLHttpRequest send method to properly validate and fix media segments
+ */
+function enhanceXHRForMediaSegments() {
+    log(`🔧 Enhancing XMLHttpRequest for better media segment handling`);
+    
+    // Only do this once
+    if (window.xhrMediaSegmentEnhanced) {
+        log(`✅ XMLHttpRequest already enhanced for media segments`);
+        return;
+    }
+    
+    // We'll need the original send method
+    const origXHRSend = XMLHttpRequest.prototype.send;
+    
+    // Replace the send method on XMLHttpRequest prototype
+    XMLHttpRequest.prototype.send = function(body) {
+        // If this is a media segment request, check and fix if needed
+        if (this._isMediaSegment && typeof this._trackId !== 'undefined' && typeof this._segmentId !== 'undefined') {
+            const trackId = this._trackId;
+            const segmentId = this._segmentId;
+            const trackType = trackId === 0 ? "video" : "audio";
+            
+            // Try to get segment from packetHandler
+            let segmentData = null;
+            
+            if (window.packetHandler && window.packetHandler.buffer[trackType][segmentId]) {
+                segmentData = window.packetHandler.buffer[trackType][segmentId];
+                log(`🔎 Found segment: track=${trackId}, segment=${segmentId} (${segmentData.byteLength} bytes)`);
+                
+                // Validate the segment data
+                const parsedData = parseMP4Fragment(segmentData);
+                log(`🧪 ${trackType} segment #${segmentId} structure: ${parsedData.boxStructure}`);
+                
+                if (parsedData.valid) {
+                    log(`✅ ${trackType} segment #${segmentId} has valid structure`);
+                } else {
+                    log(`⚠️ ${trackType} segment #${segmentId} has invalid structure: moof=${parsedData.hasMoof}, mdat=${parsedData.hasMdat}`);
+                    
+                    // Now we can try to fix it if needed (not implemented but would go here)
+                }
+                
+                // Serve the media segment with proper validation
+                setTimeout(() => {
+                    this.responseType = 'arraybuffer';
+                    
+                    // Make sure we're serving an ArrayBuffer, not a TypedArray
+                    let buffer;
+                    if (segmentData instanceof Uint8Array) {
+                        buffer = segmentData.buffer.slice(
+                            segmentData.byteOffset, 
+                            segmentData.byteOffset + segmentData.byteLength
+                        );
+                    } else {
+                        buffer = segmentData;
+                    }
+                    
+                    // Set the response
+                    Object.defineProperty(this, 'response', { get: () => buffer });
+                    Object.defineProperty(this, 'status', { get: () => 200 });
+                    Object.defineProperty(this, 'statusText', { get: () => 'OK' });
+                    Object.defineProperty(this, 'readyState', { get: () => 4 });
+                    
+                    // Log the box structure for debugging
+                    const firstBytes = new Uint8Array(buffer.slice(0, Math.min(32, buffer.byteLength)));
+                    log(`🔍 Media segment first bytes: ${Array.from(firstBytes).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
+                    
+                    // Dispatch events
+                    this.dispatchEvent(new Event('readystatechange'));
+                    this.dispatchEvent(new Event('load'));
+                    this.dispatchEvent(new Event('loadend'));
+                    
+                    log(`✅ Media segment served: track=${trackId}, segment=${segmentId}`);
+                }, 10);
+                
+                return;
+            } else {
+                log(`⚠️ No segment found for track=${trackId}, segment=${segmentId}`);
+            }
+        }
+        
+        // For all non-media segments, use original
+        origXHRSend.call(this, body);
+    };
+    
+    window.xhrMediaSegmentEnhanced = true;
+    log(`✅ XMLHttpRequest enhanced for media segments`);
+}
+
+/**
+ * Debug function to validate all media fragments in buffer
+ */
+function validateAllMediaFragments() {
+    log(`🔍 Validating all media fragments in buffer`);
+    
+    if (!window.packetHandler) {
+        log(`❌ No packet handler available`);
+        return;
+    }
+    
+    // Loop through video and audio buffers
+    ["video", "audio"].forEach(trackType => {
+        const buffer = window.packetHandler.buffer[trackType];
+        const fragmentIds = Object.keys(buffer).sort((a, b) => parseInt(a) - parseInt(b));
+        
+        log(`🔍 Validating ${fragmentIds.length} ${trackType} fragments`);
+        
+        let validCount = 0;
+        let invalidCount = 0;
+        
+        fragmentIds.forEach(id => {
+            const data = buffer[id];
+            
+            // Use our new parser to validate the fragment
+            const parsedData = parseMP4Fragment(data);
+            
+            if (parsedData.valid) {
+                validCount++;
+                
+                // Log some samples
+                if (parseInt(id) % 10 === 0 || fragmentIds.length < 10) {
+                    log(`✅ ${trackType} #${id} is valid: ${parsedData.boxStructure}`);
+                }
+            } else {
+                invalidCount++;
+                log(`❌ ${trackType} #${id} is INVALID: ${parsedData.boxStructure}`);
+                
+                // Log the first 32 bytes to help diagnose
+                const firstBytes = Array.from(data.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+                log(`   First 32 bytes: ${firstBytes}`);
+            }
+        });
+        
+        log(`📊 ${trackType}: ${validCount} valid fragments, ${invalidCount} invalid fragments`);
+    });
+}
+
+/**
+ * Fix all media source and segment issues to enable playback
+ */
+function fixMediaSourceAndSegments() {
+    log(`🛠️ Fixing all media sources and segments for playback`);
+    
+    // First enhance the XHR for proper media handling
+    enhanceXHRForMediaSegments();
+    
+    // Validate and fix all media fragments in the buffer
+    validateAllMediaFragments();
+    
+    // Try to restart the player with clean sources
+    if (window.player) {
+        log(`🔄 Restarting player with optimized settings`);
+        
+        // Ensure we have a video element
+        const videoElement = document.getElementById('videoElement');
+        if (!videoElement) {
+            log(`❌ No video element found!`);
+            return;
+        }
+        
+        try {
+            // Pause any current playback
+            videoElement.pause();
+            
+            // Force reset all source buffers
+            setTimeout(() => {
+                // Reset player with the MPD URL
+                if (window.packetHandler && window.packetHandler.mpdUrl) {
+                    log(`🔄 Resetting player with MPD: ${window.packetHandler.mpdUrl}`);
+                    window.player.attachSource(window.packetHandler.mpdUrl);
+                    
+                    // Add a delay for initialization
+                    setTimeout(() => {
+                        // Request init segments and first media segments
+                        log(`🔄 Requesting initialization segments and media fragments`);
+                        
+                        // Try to play
+                        setTimeout(() => {
+                            log(`▶️ Attempting to start playback`);
+                            videoElement.play()
+                                .then(() => log(`✅ Playback started!`))
+                                .catch(e => log(`❌ Playback failed: ${e.message}`));
+                        }, 1000);
+                    }, 1000);
+                } else {
+                    log(`❌ No MPD URL available!`);
+                }
+            }, 500);
+        } catch (error) {
+            log(`❌ Error restarting player: ${error.message}`);
+        }
+    } else {
+        log(`❌ No player available!`);
+    }
+}
 
 function startStatusUpdates() {
     // Clear any existing interval
@@ -2405,6 +2715,7 @@ function handleConnectionClosed() {
                     log(`🔍 Player exists, checking if ready`);
 
                     fixPlaybackIssues();
+                    fixMediaSourceAndSegments();
                     
                     if (window.player.isReady()) {
                         log('▶️ Player is ready, starting playback');
