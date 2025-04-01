@@ -1150,6 +1150,7 @@ function extractSegmentId(url) {
         log(`🔑 Serving ${trackType} init segment (${initData.byteLength} bytes)`);
         
         setTimeout(() => {
+          // IMPORTANT: Ensure we're using the correct responseType
           this.responseType = 'arraybuffer';
           
           // Make sure we're serving an ArrayBuffer, not a TypedArray
@@ -1163,11 +1164,17 @@ function extractSegmentId(url) {
             buffer = initData;
           }
           
+          // Set the correct response properties
           Object.defineProperty(this, 'response', { get: () => buffer });
           Object.defineProperty(this, 'status', { get: () => 200 });
           Object.defineProperty(this, 'statusText', { get: () => 'OK' });
           Object.defineProperty(this, 'readyState', { get: () => 4 });
           
+          // Add debugging to verify data is valid
+          const firstBytes = new Uint8Array(buffer.slice(0, Math.min(16, buffer.byteLength)));
+          log(`🔍 Init segment first bytes: ${Array.from(firstBytes).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
+          
+          // Dispatch events to signal completion
           this.dispatchEvent(new Event('readystatechange'));
           this.dispatchEvent(new Event('load'));
           this.dispatchEvent(new Event('loadend'));
@@ -1181,18 +1188,47 @@ function extractSegmentId(url) {
       }
     }
     
-    // Media Segment Request
+    // Media Segment Request - IMPROVED VERSION
     if (this._isMediaSegment && typeof this._trackId !== 'undefined' && typeof this._segmentId !== 'undefined') {
       const trackId = this._trackId;
       const segmentId = this._segmentId;
+      const trackType = trackId === 0 ? "video" : "audio";
       
       // Try to get segment from packetHandler
-      const segmentData = findMediaSegment(trackId, segmentId);
+      let segmentData = null;
+      
+      // First check if exact segment exists in buffer
+      if (window.packetHandler && window.packetHandler.buffer[trackType][segmentId]) {
+        segmentData = window.packetHandler.buffer[trackType][segmentId];
+        log(`🎬 Found exact segment: track=${trackId}, segment=${segmentId}`);
+      } 
+      // If not, try to find a segment close to the requested one
+      else if (window.packetHandler) {
+        const buffer = window.packetHandler.buffer[trackType];
+        const keys = Object.keys(buffer).map(Number).sort((a, b) => a - b);
+        
+        if (keys.length > 0) {
+          // Try to find closest segment - better to use newer segments
+          const closerKeys = keys.filter(k => Math.abs(k - segmentId) < 10);
+          
+          if (closerKeys.length > 0) {
+            const closestId = closerKeys.sort((a, b) => Math.abs(a - segmentId) - Math.abs(b - segmentId))[0];
+            log(`🔄 Using closest segment: ${trackType} #${closestId} instead of #${segmentId}`);
+            segmentData = buffer[closestId];
+          } else {
+            // Default to most recent segment
+            const latestKey = keys[keys.length - 1];
+            log(`🔄 Using latest segment: ${trackType} #${latestKey} instead of #${segmentId}`);
+            segmentData = buffer[latestKey];
+          }
+        }
+      }
       
       if (segmentData) {
         log(`🎬 Serving segment: track=${trackId}, segment=${segmentId} (${segmentData.byteLength} bytes)`);
         
         setTimeout(() => {
+          // IMPORTANT: Ensure using correct responseType
           this.responseType = 'arraybuffer';
           
           // Make sure we're serving an ArrayBuffer, not a TypedArray
@@ -1206,11 +1242,36 @@ function extractSegmentId(url) {
             buffer = segmentData;
           }
           
+          // Set the correct response properties with proper content type
           Object.defineProperty(this, 'response', { get: () => buffer });
           Object.defineProperty(this, 'status', { get: () => 200 });
           Object.defineProperty(this, 'statusText', { get: () => 'OK' });
           Object.defineProperty(this, 'readyState', { get: () => 4 });
           
+          // Add debugging to verify data
+          const firstBytes = new Uint8Array(buffer.slice(0, Math.min(16, buffer.byteLength)));
+          log(`🔍 Media segment first bytes: ${Array.from(firstBytes).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
+          
+          // Validate segment contains moof/mdat boxes (required for MSE)
+          let hasMoof = false;
+          let hasMdat = false;
+          const u8Data = new Uint8Array(buffer);
+          
+          // Check for moof and mdat boxes in the first 100 bytes
+          for (let i = 0; i < Math.min(u8Data.length - 8, 100); i += 4) {
+            if (i + 8 <= u8Data.length) {
+              const boxType = String.fromCharCode(
+                u8Data[i + 4], u8Data[i + 5], u8Data[i + 6], u8Data[i + 7]
+              );
+              
+              if (boxType === 'moof') hasMoof = true;
+              if (boxType === 'mdat') hasMdat = true;
+            }
+          }
+          
+          log(`🎬 Media validation: track=${trackId}, segment=${segmentId}, hasMoof=${hasMoof}, hasMdat=${hasMdat}`);
+          
+          // Dispatch events to signal completion
           this.dispatchEvent(new Event('readystatechange'));
           this.dispatchEvent(new Event('load'));
           this.dispatchEvent(new Event('loadend'));
@@ -1239,50 +1300,6 @@ function extractSegmentId(url) {
     // Fall back to original XHR behavior for any unhandled requests
     originalXHRSend.call(this, body);
   };
-  
-  // Helper function to find media segment in buffer
-  function findMediaSegment(trackId, segmentId) {
-    if (!window.packetHandler) return null;
-    
-    const trackType = trackId === 0 ? "video" : "audio";
-    const buffer = window.packetHandler.buffer[trackType];
-    
-    if (!buffer || Object.keys(buffer).length === 0) return null;
-    
-    // Try exact match first
-    if (buffer[segmentId]) {
-      return buffer[segmentId];
-    }
-    
-    // Get all available segment IDs
-    const keys = Object.keys(buffer)
-      .map(k => parseInt(k, 10))
-      .sort((a, b) => a - b);
-    
-    if (keys.length === 0) return null;
-    
-    // Try to find a segment close to the requested one
-    const closerSegments = keys.filter(k => Math.abs(k - segmentId) < 10);
-    if (closerSegments.length > 0) {
-      // Prefer segments that come after the requested one
-      const futureSegments = closerSegments.filter(k => k >= segmentId);
-      if (futureSegments.length > 0) {
-        const closest = futureSegments.sort((a, b) => a - b)[0];
-        log(`🔍 Using future segment: ${trackType} #${closest} instead of #${segmentId}`);
-        return buffer[closest];
-      }
-      
-      // Otherwise use closest available
-      const closest = closerSegments.sort((a, b) => Math.abs(a - segmentId) - Math.abs(b - segmentId))[0];
-      log(`🔍 Using nearest segment: ${trackType} #${closest} instead of #${segmentId}`);
-      return buffer[closest];
-    }
-    
-    // Fallback to the newest segment
-    const latest = keys[keys.length - 1];
-    log(`🔍 Using latest segment: ${trackType} #${latest} instead of #${segmentId}`);
-    return buffer[latest];
-  }
   
   log(`✅ Enhanced XHR interception setup completed`);
   return true;
@@ -2610,9 +2627,9 @@ function log(message) {
 }
 
 /**
- * Setup DASH.js player
+ * Setup DASH.js player with enhanced debugging and configuration
  */
-function setupDashPlayer(mpdUrl = '/vivoh.mpd') {
+ function setupDashPlayer(mpdUrl = '/vivoh.mpd') {
     if (window.player) {
         log(`📝 Player already exists, skipping creation`);
         return window.player;
@@ -2645,35 +2662,60 @@ function setupDashPlayer(mpdUrl = '/vivoh.mpd') {
         // Create player with optimized settings
         window.player = dashjs.MediaPlayer().create();
         
-        // Apply streaming settings
+        // Enable debug logging
+        window.player.updateSettings({
+            'debug': {
+                'logLevel': dashjs.Debug.LOG_LEVEL_DEBUG
+            }
+        });
+        
+        // Apply streaming settings with more permissive buffer configuration
         window.player.updateSettings({
             'streaming': {
                 'buffer': {
                     'fastSwitchEnabled': true,
-                    'bufferTimeDefault': 20,           // Replaces stableBufferTime
-                    'bufferTimeAtTopQuality': 30,
-                    'bufferPruningInterval': 10
+                    'bufferTimeDefault': 10,          // Lower buffer requirements
+                    'bufferTimeAtTopQuality': 15,     // Lower buffer requirements
+                    'bufferPruningInterval': 5,       // More frequent pruning
+                    'stableBufferTime': 10,          // Maintain reasonable buffer
+                    'abandonLoadTimeout': 10000       // Longer timeout for segment loading
                 },
-                'gaps': {                              // Replaces jumpGaps and smallGapLimit
+                'gaps': {
                     'jumpGaps': true,
-                    'smallGapLimit': 1.5
+                    'jumpLargeGaps': true,
+                    'smallGapLimit': 1.8,
+                    'threshold': 0.3
                 },
-                'delay': {                             // Part of low latency settings
-                    'liveDelay': 3,
-                    'useSuggestedPresentationDelay': true
+                'delay': {
+                    'liveDelay': 2,
+                    'useSuggestedPresentationDelay': true,
+                    'lowLatencyEnabled': false
                 },
-                'liveCatchup': {                       // For low latency streams
-                    'enabled': true,
-                    'maxDrift': 0.5,
+                'liveCatchup': {
+                    'enabled': false,              // Disable catchup for VOD content
                     'playbackRate': {
-                        'min': 0.5,
-                        'max': 1.5
+                        'min': 0.8,
+                        'max': 1.2
                     }
+                },
+                'abr': {
+                    'useDefaultABRRules': true,
+                    'autoSwitchBitrate': {
+                        'audio': true,
+                        'video': true
+                    },
+                    'initialBitrate': {
+                        'audio': -1,
+                        'video': -1
+                    }
+                },
+                'cmcd': {
+                    'enabled': false
                 }
             }
         });
         
-        // Add event handlers
+        // Add event handlers with more detailed logging
         window.player.on(dashjs.MediaPlayer.events.ERROR, (e) => {
             let errorDetail = '';
             if (e.error) {
@@ -2706,14 +2748,121 @@ function setupDashPlayer(mpdUrl = '/vivoh.mpd') {
             updateUI();
         });
         
-        window.player.on(dashjs.MediaPlayer.events.FRAGMENT_LOADING_COMPLETED, (e) => {
-            if (e.request && e.request.mediaType) {
-                log(`✅ Fragment loaded: type=${e.request.mediaType}, time=${e.request.startTime}`);
+        // Add segment loading event handlers
+        window.player.on(dashjs.MediaPlayer.events.FRAGMENT_LOADING_STARTED, (e) => {
+            if (e.request) {
+                log(`🔄 Fragment loading started: type=${e.request.mediaType}, time=${e.request.startTime}, url=${e.request.url}`);
             }
         });
         
-        // Initialize player
+        window.player.on(dashjs.MediaPlayer.events.FRAGMENT_LOADING_COMPLETED, (e) => {
+            if (e.request && e.request.mediaType) {
+                log(`✅ Fragment loaded: type=${e.request.mediaType}, time=${e.request.startTime}, bytes=${e.request.bytesLoaded || 'unknown'}`);
+            }
+        });
+        
+        window.player.on(dashjs.MediaPlayer.events.FRAGMENT_LOADING_ABANDONED, (e) => {
+            if (e.request) {
+                log(`⚠️ Fragment loading abandoned: type=${e.request.mediaType}, time=${e.request.startTime}`);
+            }
+        });
+        
+        // Add initialization events
+        window.player.on(dashjs.MediaPlayer.events.MANIFEST_LOADED, () => {
+            log(`📄 Manifest loaded successfully`);
+        });
+        
+        window.player.on(dashjs.MediaPlayer.events.STREAM_INITIALIZED, () => {
+            log(`🌊 Stream initialized`);
+        });
+        
+        window.player.on(dashjs.MediaPlayer.events.BUFFER_LEVEL_UPDATED, (e) => {
+            if (e.mediaType === 'video' && window.playerState === 'buffering') {
+                log(`📊 Buffer level (${e.mediaType}): ${e.bufferLevel.toFixed(2)}s`);
+            }
+        });
+        
+        // Add media source events
+        window.player.on('sourcebufferAppended', (e) => {
+            if (e.buffer && e.mediaType) {
+                log(`➕ Source buffer appended: type=${e.mediaType}, size=${e.buffer.byteLength || 'unknown'}`);
+            }
+        });
+        
+        // Track video element state changes
+        videoElement.addEventListener('loadedmetadata', () => {
+            log(`🎥 Video loadedmetadata event - readyState: ${videoElement.readyState}`);
+        });
+        
+        videoElement.addEventListener('canplay', () => {
+            log(`🎥 Video canplay event - readyState: ${videoElement.readyState}`);
+        });
+        
+        videoElement.addEventListener('playing', () => {
+            log(`🎥 Video playing event - readyState: ${videoElement.readyState}`);
+        });
+        
+        videoElement.addEventListener('waiting', () => {
+            log(`🎥 Video waiting event - readyState: ${videoElement.readyState}`);
+        });
+        
+        videoElement.addEventListener('error', (e) => {
+            const error = videoElement.error || {};
+            log(`🎥 Video error event: code=${error.code}, message=${error.message || 'No details'}`);
+        });
+        
+        // Initialize player with manual attachment to video element
+        // This gives us more control over the initialization process
         window.player.initialize(videoElement, mpdUrl, false); // Autoplay=false
+        
+        // Force a re-trigger of initialization
+        setTimeout(() => {
+            if (window.player && window.playerState !== 'playing') {
+                // Reload the manifest to ensure we have latest data
+                log(`🔄 Refreshing manifest and stream setup`);
+                window.player.attachSource(mpdUrl);
+            }
+        }, 2000);
+        
+        // Additional debugging - periodically log buffer state
+        const bufferCheckInterval = setInterval(() => {
+            if (!window.player) {
+                clearInterval(bufferCheckInterval);
+                return;
+            }
+            
+            try {
+                const videoBuffer = window.player.getBufferLength("video") || 0;
+                const audioBuffer = window.player.getBufferLength("audio") || 0;
+                log(`📊 Buffer state: Video=${videoBuffer.toFixed(2)}s, Audio=${audioBuffer.toFixed(2)}s`);
+                
+                // If we have good buffer but video isn't playing, try to force start
+                if (videoBuffer > 5 && audioBuffer > 5 && window.playerState !== 'playing') {
+                    log(`🔄 We have buffer but video isn't playing - attempting to force start`);
+                    const videoElement = document.getElementById('videoElement');
+                    if (videoElement) {
+                        videoElement.currentTime = 0;
+                        try {
+                            // Try to force a play operation
+                            videoElement.play()
+                                .then(() => log(`✅ Forced play succeeded!`))
+                                .catch(e => log(`❌ Forced play failed: ${e.message || 'Unknown error'}`));
+                        } catch (e) {
+                            log(`❌ Error attempting forced play: ${e.message || 'Unknown error'}`);
+                        }
+                    }
+                }
+            } catch (e) {
+                log(`⚠️ Error checking buffer: ${e.message || 'Unknown error'}`);
+            }
+        }, 5000);
+        
+        // Store interval for cleanup
+        if (!window.bufferLoggingIntervals) {
+            window.bufferLoggingIntervals = [];
+        }
+        window.bufferLoggingIntervals.push(bufferCheckInterval);
+        
         log(`🎬 DASH.js player initialized with MPD URL: ${mpdUrl}`);
         
         window.playerState = 'ready';
@@ -2727,6 +2876,319 @@ function setupDashPlayer(mpdUrl = '/vivoh.mpd') {
     }
 }
 
+/**
+ * Check fragment metadata in detail
+ */
+function checkFragmentMetadataDetailed() {
+    if (!window.packetHandler) {
+        log(`❌ No packet handler available`);
+        return;
+    }
+    
+    ["video", "audio"].forEach(trackType => {
+        const buffer = window.packetHandler.buffer[trackType];
+        const fragmentIds = Object.keys(buffer).sort((a, b) => parseInt(a) - parseInt(b));
+        
+        let hasMoofCount = 0;
+        let hasMdatCount = 0;
+        let segmentSizes = [];
+        
+        fragmentIds.forEach(id => {
+            const data = buffer[id];
+            
+            // Check for moof and mdat boxes which are essential in a media fragment
+            let hasMoof = false;
+            let hasMdat = false;
+            
+            for (let i = 0; i < Math.min(data.length - 8, 200); i += 4) {
+                if (i + 8 <= data.length) {
+                    const boxTypeAtPos = String.fromCharCode(
+                        data[i + 4], data[i + 5], data[i + 6], data[i + 7]
+                    );
+                    
+                    if (boxTypeAtPos === 'moof') {
+                        hasMoof = true;
+                        hasMoofCount++;
+                    }
+                    
+                    if (boxTypeAtPos === 'mdat') {
+                        hasMdat = true;
+                        hasMdatCount++;
+                    }
+                    
+                    // Once we found both boxes, no need to continue searching
+                    if (hasMoof && hasMdat) break;
+                }
+            }
+            
+            segmentSizes.push(data.length);
+            
+            // Log details for some fragments
+            if (parseInt(id) % 10 === 0 || fragmentIds.length < 10) {
+                const dataPreview = data.slice(0, Math.min(24, data.length));
+                const hexDump = Array.from(dataPreview).map(b => b.toString(16).padStart(2, '0')).join(' ');
+                
+                log(`  ${trackType} #${id}: ${data.length} bytes, moof=${hasMoof}, mdat=${hasMdat}`);
+                log(`  ${trackType} #${id} hex: ${hexDump}`);
+            }
+        });
+        
+        // Calculate size statistics
+        const avgSize = segmentSizes.length > 0 ? 
+            Math.round(segmentSizes.reduce((a, b) => a + b, 0) / segmentSizes.length) : 0;
+            
+        const minSize = segmentSizes.length > 0 ? Math.min(...segmentSizes) : 0;
+        const maxSize = segmentSizes.length > 0 ? Math.max(...segmentSizes) : 0;
+        
+        log(`📊 ${trackType}: ${fragmentIds.length} fragments, ${hasMoofCount} with moof boxes (${Math.round(hasMoofCount/Math.max(fragmentIds.length, 1)*100)}%), ${hasMdatCount} with mdat boxes (${Math.round(hasMdatCount/Math.max(fragmentIds.length, 1)*100)}%)`);
+        log(`📊 ${trackType} size stats: avg=${avgSize} bytes, min=${minSize} bytes, max=${maxSize} bytes`);
+        
+        if (hasMoofCount < fragmentIds.length) {
+            log(`⚠️ WARNING: Some ${trackType} fragments are missing moof boxes! This will prevent playback.`);
+        }
+        
+        if (hasMdatCount < fragmentIds.length) {
+            log(`⚠️ WARNING: Some ${trackType} fragments are missing mdat boxes! This will prevent playback.`);
+        }
+    });
+}
+
+/**
+ * Detailed fragment analysis for troubleshooting
+ */
+function detailedFragmentAnalysis() {
+    if (!window.packetHandler) {
+        log(`❌ No packet handler available for fragment analysis`);
+        return;
+    }
+    
+    // Check for properly structured MP4 fragments
+    ["video", "audio"].forEach(trackType => {
+        const buffer = window.packetHandler.buffer[trackType];
+        const fragmentIds = Object.keys(buffer).sort((a, b) => parseInt(a) - parseInt(b));
+        
+        log(`🔍 Analyzing ${fragmentIds.length} ${trackType} fragments...`);
+        
+        // Use first, middle, and last fragment for detailed inspection
+        const sampleIds = [];
+        if (fragmentIds.length > 0) sampleIds.push(fragmentIds[0]);
+        if (fragmentIds.length > 2) sampleIds.push(fragmentIds[Math.floor(fragmentIds.length / 2)]);
+        if (fragmentIds.length > 1) sampleIds.push(fragmentIds[fragmentIds.length - 1]);
+        
+        sampleIds.forEach(id => {
+            const data = buffer[id];
+            if (!data || data.length === 0) {
+                log(`⚠️ Fragment ${trackType}#${id} is empty!`);
+                return;
+            }
+            
+            // Parse all MP4 boxes in the fragment
+            let offset = 0;
+            const boxes = [];
+            
+            while (offset + 8 <= data.length) {
+                try {
+                    // Read size (first 4 bytes, big-endian)
+                    const size = (data[offset] << 24) | (data[offset + 1] << 16) | 
+                                (data[offset + 2] << 8) | data[offset + 3];
+                    
+                    // Read type (4 bytes after size)
+                    const type = String.fromCharCode(
+                        data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7]
+                    );
+                    
+                    // Record box details
+                    boxes.push({ type, size, offset });
+                    
+                    // Move to next box
+                    offset += size;
+                    
+                    // Sanity check - if size is 0 or too big, we might be parsing garbage
+                    if (size === 0 || size > data.length) {
+                        log(`⚠️ Invalid box size (${size}) at offset ${offset} in ${trackType}#${id}`);
+                        break;
+                    }
+                } catch (e) {
+                    log(`⚠️ Error parsing boxes in ${trackType}#${id}: ${e.message}`);
+                    break;
+                }
+            }
+            
+            // Log box structure
+            const boxStructure = boxes.map(b => `${b.type}(${b.size})`).join(' → ');
+            log(`🧪 ${trackType}#${id} box structure: ${boxStructure}`);
+            
+            // Check for valid structure (should have moof followed by mdat)
+            const hasMoof = boxes.some(b => b.type === 'moof');
+            const hasMdat = boxes.some(b => b.type === 'mdat');
+            const correctOrder = boxes.findIndex(b => b.type === 'moof') < boxes.findIndex(b => b.type === 'mdat');
+            
+            if (!hasMoof || !hasMdat) {
+                log(`⚠️ ${trackType}#${id} missing required boxes: moof=${hasMoof}, mdat=${hasMdat}`);
+            } else if (!correctOrder) {
+                log(`⚠️ ${trackType}#${id} has incorrect box order - moof should come before mdat`);
+            } else {
+                log(`✅ ${trackType}#${id} has valid MP4 fragment structure`);
+            }
+        });
+    });
+}
+
+/**
+ * Enhanced debug function to display DASH.js media state
+ */
+function debugMediaState() {
+    log(`🔍 DEBUG: Starting detailed media state diagnosis`);
+    
+    // Check if packetHandler exists
+    if (!window.packetHandler) {
+        log(`⚠️ No packetHandler available for debugging`);
+        log(`🔍 Connection status: ${window.transport ? "Connected" : "Not connected"}`);
+        log(`🔍 Player exists: ${window.player ? "Yes" : "No"}`);
+        log(`🔍 Player state: ${window.playerState || "Unknown"}`);
+        
+        // Suggest establishing connection first
+        log(`💡 Try connecting to the server first before debugging media`);
+        return;
+    }
+    
+    // Check packet and fragment counts
+    const stats = window.packetHandler.getStats();
+    log(`📊 Media Debug: WMP Packets received: ${stats.packetsReceived}`);
+    log(`📊 Fragments: Video=${stats.videoFragments}, Audio=${stats.audioFragments}`);
+    log(`📊 Init segments: Video=${stats.videoInitAvailable ? "Yes" : "No"}, Audio=${stats.audioInitAvailable ? "Yes" : "No"}`);
+    log(`📊 MPD available: ${stats.mpdAvailable ? "Yes" : "No"}`);
+    
+    // Check init segments in detail
+    checkInitSegmentsDetailed();
+    
+    // Check fragments in detail
+    checkFragmentMetadataDetailed();
+    
+    // Check player state
+    if (window.player) {
+        const videoElement = document.getElementById('videoElement');
+        if (videoElement) {
+            const readyState = videoElement.readyState;
+            const readyStateText = ["HAVE_NOTHING", "HAVE_METADATA", "HAVE_CURRENT_DATA", "HAVE_FUTURE_DATA", "HAVE_ENOUGH_DATA"][readyState] || "Unknown";
+            
+            log(`📊 Player exists, video element readyState=${readyState} (${readyStateText})`);
+            log(`📊 Player state: ${window.playerState || "Unknown"}`);
+            log(`📊 Video paused: ${videoElement.paused}, Video seeking: ${videoElement.seeking}`);
+            log(`📊 Video current time: ${videoElement.currentTime.toFixed(2)}s`);
+            log(`📊 Video duration: ${videoElement.duration || 'unknown'}`);
+            log(`📊 Video size: ${videoElement.videoWidth}x${videoElement.videoHeight}`);
+            
+            if (videoElement.error) {
+                log(`📊 Video element has error: ${videoElement.error.code} - ${videoElement.error.message || 'No details'}`);
+            }
+            
+            // Check MSE source buffers
+            if (videoElement.srcObject) {
+                log(`📊 Video has srcObject (likely MediaStream)`);
+            } else if (videoElement.src) {
+                log(`📊 Video src: ${videoElement.src}`);
+            }
+            
+            // Try to get MediaSource information
+            try {
+                if (window.player.getSource()) {
+                    log(`📊 MediaSource readyState: ${window.player.getSource().readyState}`);
+                }
+            } catch (e) {
+                log(`⚠️ Could not get MediaSource info: ${e.message}`);
+            }
+            
+            try {
+                // Try to get DASH.js internal buffer levels
+                const videoBufferLevel = window.player.getBufferLength("video") || 0;
+                const audioBufferLevel = window.player.getBufferLength("audio") || 0;
+                log(`📊 DASH.js buffer levels: Video=${videoBufferLevel.toFixed(2)}s, Audio=${audioBufferLevel.toFixed(2)}s`);
+                
+                // Check if we have active source buffers
+                const sourceBuffers = window.player.getActiveStream()?.getSourceBuffersController()?.getSourceBuffers() || [];
+                log(`📊 Active source buffers: ${sourceBuffers.length}`);
+                
+                // Try to get track info
+                const videoTrack = window.player.getCurrentTrackFor("video");
+                if (videoTrack) {
+                    log(`📊 Video track: codec=${videoTrack.codec}, bitrate=${videoTrack.bitrateValue}, id=${videoTrack.id}`);
+                }
+                
+                const audioTrack = window.player.getCurrentTrackFor("audio");
+                if (audioTrack) {
+                    log(`📊 Audio track: codec=${audioTrack.codec}, bitrate=${audioTrack.bitrateValue}, id=${audioTrack.id}`);
+                }
+            } catch (e) {
+                log(`⚠️ Error getting DASH.js details: ${e.message}`);
+            }
+        } else {
+            log(`⚠️ Player exists but no video element found!`);
+        }
+    } else {
+        log(`📊 Player does not exist yet`);
+    }
+    
+    // Force detailed diagnosis of media fragments
+    log(`🔍 Running detailed media fragment diagnosis`);
+    detailedFragmentAnalysis();
+}
+
+/**
+ * Check initialization segments in detail
+ */
+function checkInitSegmentsDetailed() {
+    if (!window.packetHandler) {
+        log(`❌ No packet handler available`);
+        return;
+    }
+    
+    ["video", "audio"].forEach(trackType => {
+        const init = window.packetHandler.init[trackType];
+        if (!init) {
+            log(`❌ No init segment for ${trackType}`);
+            return;
+        }
+        
+        // Detailed box checking
+        let foundFtyp = false;
+        let foundMoov = false;
+        let foundMvhd = false;
+        let foundMvex = false;
+        let foundTrex = false;
+        
+        // Check for required boxes in the init segment
+        for (let i = 0; i < Math.min(init.length - 8, 1000); i++) {
+            if (i + 8 <= init.length) {
+                const boxTypeAtPos = String.fromCharCode(
+                    init[i + 4], init[i + 5], init[i + 6], init[i + 7]
+                );
+                
+                if (boxTypeAtPos === 'ftyp') foundFtyp = true;
+                if (boxTypeAtPos === 'moov') foundMoov = true;
+                if (boxTypeAtPos === 'mvhd') foundMvhd = true;
+                if (boxTypeAtPos === 'mvex') foundMvex = true;
+                if (boxTypeAtPos === 'trex') foundTrex = true;
+            }
+        }
+        
+        // Log the first 32 bytes to help debug format issues
+        const initPreview = init.slice(0, Math.min(32, init.length));
+        const hexDump = Array.from(initPreview).map(b => b.toString(16).padStart(2, '0')).join(' ');
+        
+        log(`🧪 ${trackType} init segment: ${init.length} bytes`);
+        log(`🧪 ${trackType} init segment hex: ${hexDump}`);
+        log(`🧪 ${trackType} init segment boxes: ftyp=${foundFtyp}, moov=${foundMoov}, mvhd=${foundMvhd}, mvex=${foundMvex}, trex=${foundTrex}`);
+        
+        if (!foundMvex) {
+            log(`⚠️ WARNING: ${trackType} init segment missing mvex box, DASH playback may fail!`);
+        }
+        
+        if (!foundFtyp || !foundMoov) {
+            log(`⚠️ WARNING: ${trackType} init segment missing required boxes (ftyp=${foundFtyp}, moov=${foundMoov})!`);
+        }
+    });
+}
     </script>
 </body>
 </html>
