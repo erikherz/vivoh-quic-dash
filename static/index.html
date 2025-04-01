@@ -1856,7 +1856,7 @@ async function listenToIncomingStreams(transport, packetHandler) {
 }
 
 /**
- * Process a WebTransport stream
+ * Process a WebTransport stream with proper chunk buffering
  * 
  * @param {ReadableStream} stream - The WebTransport stream
  * @param {number} streamId - Stream identifier for logging
@@ -1880,18 +1880,20 @@ async function listenToIncomingStreams(transport, packetHandler) {
     
     try {
         let totalBytes = 0;
-        let buffer = new Uint8Array(0);
         let chunkCounter = 0;
+        let buffer = new Uint8Array(0);
+        let expectedPacketSize = 0;
+        let headerParsed = false;
         
         while (!window.disconnectionRequested) {
             const { value, done } = await reader.read();
             
             if (done) {
-                // Process any remaining data in buffer
-                if (buffer.length >= 36) { // Updated minimum size for header + field lengths
+                // Process any remaining data in buffer if it might be complete
+                if (buffer.length > 0 && buffer.length >= expectedPacketSize && expectedPacketSize > 0) {
                     try {
-                        log(`Processing final buffer of ${buffer.length} bytes`);
-                        window.packetHandler.processWMPPacket(buffer);
+                        log(`Processing final buffer of ${buffer.length} bytes (expected size: ${expectedPacketSize})`);
+                        window.packetHandler.processWMPPacket(buffer.slice(0, expectedPacketSize));
                     } catch (e) {
                         log(`❌ Error processing final buffer: ${e.message}`);
                     }
@@ -1914,38 +1916,139 @@ async function listenToIncomingStreams(transport, packetHandler) {
                 log(`📦 Stream #${streamId} chunk #${chunkCounter}: ${value.byteLength} bytes (total: ${totalBytes})`);
             }
             
-            // Try to process the chunk directly if it's large enough
-            if (value.byteLength >= 36) { // Updated minimum size for our packet format
-                try {
-                    const processed = window.packetHandler.processWMPPacket(value);
-                    if (processed) {
-                        // Successfully processed as standalone chunk
-                        continue; // Skip buffer handling
-                    }
-                } catch (e) {
-                    // Failed to process as standalone chunk, will add to buffer
-                    log(`⚠️ Error processing chunk directly: ${e.message}`);
-                }
-            }
-            
-            // Append to buffer
+            // Add new chunk to our buffer
             const newBuffer = new Uint8Array(buffer.length + value.length);
             newBuffer.set(buffer);
             newBuffer.set(value, buffer.length);
             buffer = newBuffer;
             
-            // Try to process buffer if it's large enough
-            if (buffer.length >= 36) { // Updated minimum size
+            // Process complete packets from the buffer
+            while (buffer.length > 0) {
+                // Need at least 36 bytes to read the header (12 bytes) and field lengths (5*4=20 bytes)
+                if (buffer.length < 36) {
+                    // Not enough data for header, wait for more
+                    break;
+                }
+                
+                // If we haven't calculated the expected packet size yet, do it now
+                if (!headerParsed) {
+                    try {
+                        const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+                        
+                        // Skip packet ID (4), timestamp (8), and duration (4)
+                        const mpegLength = view.getUint32(16);
+                        const audioInitLength = view.getUint32(20);
+                        const videoInitLength = view.getUint32(24);
+                        const audioDataLength = view.getUint32(28);
+                        const videoDataLength = view.getUint32(32);
+                        
+                        // Calculate total expected packet size
+                        expectedPacketSize = 36 + mpegLength + audioInitLength + videoInitLength + 
+                                           audioDataLength + videoDataLength;
+                        
+                        headerParsed = true;
+                        
+                        // Debug log the expected sizes
+                        if (chunkCounter % 10 === 0 || chunkCounter === 1) {
+                            log(`📊 Expected packet size: ${expectedPacketSize} bytes`);
+                            log(`📊 Field sizes: MPD=${mpegLength}, AudioInit=${audioInitLength}, VideoInit=${videoInitLength}, AudioData=${audioDataLength}, VideoData=${videoDataLength}`);
+                        }
+                        
+                        // Sanity check - if any field size is unreasonably large, it's likely corrupted
+                        const MAX_REASONABLE_SIZE = 10 * 1024 * 1024; // 10MB
+                        if (expectedPacketSize > MAX_REASONABLE_SIZE || 
+                            mpegLength > MAX_REASONABLE_SIZE || 
+                            audioInitLength > MAX_REASONABLE_SIZE ||
+                            videoInitLength > MAX_REASONABLE_SIZE ||
+                            audioDataLength > MAX_REASONABLE_SIZE ||
+                            videoDataLength > MAX_REASONABLE_SIZE) {
+                            log(`⚠️ Unreasonable packet size detected (${expectedPacketSize} bytes). Corrupted header?`);
+                            
+                            // Attempt to recover by looking for a valid header pattern
+                            let validHeaderFound = false;
+                            
+                            // Skip this byte and try next position (sliding window approach)
+                            for (let i = 1; i < buffer.length - 36; i++) {
+                                // Try to find a reasonable header at this offset
+                                try {
+                                    const offsetView = new DataView(buffer.buffer, buffer.byteOffset + i, buffer.byteLength - i);
+                                    
+                                    const testMpegLength = offsetView.getUint32(16);
+                                    const testAudioInitLength = offsetView.getUint32(20);
+                                    const testVideoInitLength = offsetView.getUint32(24);
+                                    const testAudioDataLength = offsetView.getUint32(28);
+                                    const testVideoDataLength = offsetView.getUint32(32);
+                                    
+                                    const testExpectedSize = 36 + testMpegLength + testAudioInitLength + 
+                                                           testVideoInitLength + testAudioDataLength + testVideoDataLength;
+                                    
+                                    // If all sizes look reasonable, we may have found a valid header
+                                    if (testExpectedSize < MAX_REASONABLE_SIZE && 
+                                        testExpectedSize > 36 &&
+                                        testMpegLength < MAX_REASONABLE_SIZE && 
+                                        testAudioInitLength < MAX_REASONABLE_SIZE &&
+                                        testVideoInitLength < MAX_REASONABLE_SIZE &&
+                                        testAudioDataLength < MAX_REASONABLE_SIZE &&
+                                        testVideoDataLength < MAX_REASONABLE_SIZE) {
+                                        
+                                        log(`🔄 Found potential valid header at offset ${i}`);
+                                        buffer = buffer.slice(i);
+                                        headerParsed = false;  // Re-parse the header
+                                        validHeaderFound = true;
+                                        break;
+                                    }
+                                } catch (e) {
+                                    // Skip this position if there's an error
+                                }
+                            }
+                            
+                            if (!validHeaderFound) {
+                                // If we couldn't find a valid header, discard the buffer and wait for more data
+                                log(`❌ Could not find valid header, discarding ${buffer.length} bytes`);
+                                buffer = new Uint8Array(0);
+                                headerParsed = false;
+                            }
+                            break;
+                        }
+                    } catch (e) {
+                        log(`❌ Error parsing header: ${e.message}`);
+                        // Discard a byte and try again
+                        buffer = buffer.slice(1);
+                        headerParsed = false;
+                        continue;
+                    }
+                }
+                
+                // If we don't have the full packet yet, wait for more data
+                if (buffer.length < expectedPacketSize) {
+                    if (chunkCounter % 20 === 0) {
+                        log(`⏳ Waiting for more data: have ${buffer.length} bytes, need ${expectedPacketSize} bytes`);
+                    }
+                    break;
+                }
+                
+                // We have a complete packet! Extract and process it
+                const packetData = buffer.slice(0, expectedPacketSize);
+                
                 try {
-                    const result = window.packetHandler.processWMPPacket(buffer);
-                    if (result) {
-                        // Buffer successfully processed, clear it
-                        buffer = new Uint8Array(0);
+                    // Process the complete packet
+                    const success = window.packetHandler.processWMPPacket(packetData);
+                    
+                    if (!success) {
+                        log(`⚠️ Failed to process packet of size ${expectedPacketSize}`);
+                    } else if (chunkCounter % 20 === 0) {
+                        log(`✅ Successfully processed complete packet of size ${expectedPacketSize} bytes`);
                     }
                 } catch (e) {
-                    // Keep data in buffer, might need more data
-                    log(`⚠️ Error processing buffered data: ${e.message}`);
+                    log(`❌ Error processing packet: ${e.message}`);
                 }
+                
+                // Remove the processed packet from buffer
+                buffer = buffer.slice(expectedPacketSize);
+                
+                // Reset for next packet
+                headerParsed = false;
+                expectedPacketSize = 0;
             }
             
             // Check if media is ready and player should be initialized
