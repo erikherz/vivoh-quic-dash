@@ -362,72 +362,125 @@ function log(message) {
         }
     }
     
-    /**
-     * Extract header fields and media data from a packet
-     * 
-     * @param {Uint8Array} dataArray - The packet data
-     * @returns {object} - Extracted header fields and media data
-     * @private
-     */
-    _extractPacketHeader(dataArray) {
-        const view = new DataView(dataArray.buffer, dataArray.byteOffset, dataArray.byteLength);
+ /**
+ * Extract header fields and media data from a packet
+ * 
+ * @param {Uint8Array} dataArray - The packet data
+ * @returns {object} - Extracted header fields and media data
+ * @private
+ */
+_extractPacketHeader(dataArray) {
+    // Log packet size for debugging
+    log(`🔍 Processing packet with size: ${dataArray.byteLength} bytes`);
+    
+    const view = new DataView(dataArray.buffer, dataArray.byteOffset, dataArray.byteLength);
+    
+    // Extract header fields
+    const packetId = view.getUint32(0);
+    const timestamp = view.getBigUint64(4);
+    const duration = view.getUint32(12);
+    
+    // Extract field lengths with validation and debugging
+    const fieldLengths = [];
+    try {
+        fieldLengths.push(view.getUint32(16)); // mpd length
+        fieldLengths.push(view.getUint32(20)); // audio_init length
+        fieldLengths.push(view.getUint32(24)); // video_init length
+        fieldLengths.push(view.getUint32(28)); // audio_data length
+        fieldLengths.push(view.getUint32(32)); // video_data length
         
-        // Extract header fields
-        const packetId = view.getUint32(0);
-        const timestamp = view.getBigUint64(4);
-        const duration = view.getUint32(12);
+        // Log field lengths for debugging
+        log(`🔍 Field lengths: MPD=${fieldLengths[0]}, AudioInit=${fieldLengths[1]}, VideoInit=${fieldLengths[2]}, AudioData=${fieldLengths[3]}, VideoData=${fieldLengths[4]}`);
         
-        // Extract field lengths
-        const fieldLengths = [
-            view.getUint32(16),  // mpd length
-            view.getUint32(20),  // audio_init length
-            view.getUint32(24),  // video_init length
-            view.getUint32(28),  // audio_data length
-            view.getUint32(32)   // video_data length
-        ];
+        // Validate that field lengths make sense
+        const totalFieldsSize = fieldLengths.reduce((sum, len) => sum + len, 0);
+        log(`🔍 Total fields size: ${totalFieldsSize}, Packet size: ${dataArray.byteLength}, Header size: 36`);
         
-        // Calculate field positions
-        let position = 36;  // Start after header and field lengths
-        const fields = {
-            mpd: new Uint8Array(0),
-            audioInit: new Uint8Array(0),
-            videoInit: new Uint8Array(0),
-            audioData: new Uint8Array(0),
-            videoData: new Uint8Array(0)
-        };
-        
-        // Extract each field
-        if (position + fieldLengths[0] <= dataArray.length) {
-            fields.mpd = dataArray.slice(position, position + fieldLengths[0]);
+        if (totalFieldsSize + 36 > dataArray.byteLength) {
+            log(`⚠️ Warning: Field lengths (${totalFieldsSize}) + header (36) exceed packet size (${dataArray.byteLength})`);
+        }
+    } catch (error) {
+        log(`❌ Error extracting field lengths: ${error.message}`);
+        // Provide default values to avoid crashes
+        while (fieldLengths.length < 5) fieldLengths.push(0);
+    }
+    
+    // Calculate field positions
+    let position = 36;  // Start after header and field lengths
+    const fields = {
+        mpd: new Uint8Array(0),
+        audioInit: new Uint8Array(0),
+        videoInit: new Uint8Array(0),
+        audioData: new Uint8Array(0),
+        videoData: new Uint8Array(0)
+    };
+    
+    // Extract each field with enhanced validation
+    try {
+        // Extract MPD data
+        if (fieldLengths[0] > 0) {
+            if (position + fieldLengths[0] <= dataArray.byteLength) {
+                fields.mpd = dataArray.slice(position, position + fieldLengths[0]);
+                log(`✅ Extracted MPD field: ${fields.mpd.byteLength} bytes`);
+            } else {
+                log(`⚠️ MPD field extends beyond packet bounds: pos=${position}, len=${fieldLengths[0]}, available=${dataArray.byteLength - position}`);
+            }
             position += fieldLengths[0];
         }
         
-        if (position + fieldLengths[1] <= dataArray.length) {
-            fields.audioInit = dataArray.slice(position, position + fieldLengths[1]);
+        // Extract audio init segment
+        if (fieldLengths[1] > 0) {
+            if (position + fieldLengths[1] <= dataArray.byteLength) {
+                fields.audioInit = dataArray.slice(position, position + fieldLengths[1]);
+                log(`✅ Extracted AudioInit field: ${fields.audioInit.byteLength} bytes`);
+            } else {
+                log(`⚠️ AudioInit field extends beyond packet bounds: pos=${position}, len=${fieldLengths[1]}, available=${dataArray.byteLength - position}`);
+            }
             position += fieldLengths[1];
         }
         
-        if (position + fieldLengths[2] <= dataArray.length) {
-            fields.videoInit = dataArray.slice(position, position + fieldLengths[2]);
+        // Extract video init segment
+        if (fieldLengths[2] > 0) {
+            if (position + fieldLengths[2] <= dataArray.byteLength) {
+                fields.videoInit = dataArray.slice(position, position + fieldLengths[2]);
+                log(`✅ Extracted VideoInit field: ${fields.videoInit.byteLength} bytes`);
+            } else {
+                log(`⚠️ VideoInit field extends beyond packet bounds: pos=${position}, len=${fieldLengths[2]}, available=${dataArray.byteLength - position}`);
+            }
             position += fieldLengths[2];
         }
         
-        if (position + fieldLengths[3] <= dataArray.length) {
-            fields.audioData = dataArray.slice(position, position + fieldLengths[3]);
+        // Extract audio data
+        if (fieldLengths[3] > 0) {
+            if (position + fieldLengths[3] <= dataArray.byteLength) {
+                fields.audioData = dataArray.slice(position, position + fieldLengths[3]);
+                log(`✅ Extracted AudioData field: ${fields.audioData.byteLength} bytes`);
+            } else {
+                log(`⚠️ AudioData field extends beyond packet bounds: pos=${position}, len=${fieldLengths[3]}, available=${dataArray.byteLength - position}`);
+            }
             position += fieldLengths[3];
         }
         
-        if (position + fieldLengths[4] <= dataArray.length) {
-            fields.videoData = dataArray.slice(position, position + fieldLengths[4]);
+        // Extract video data
+        if (fieldLengths[4] > 0) {
+            if (position + fieldLengths[4] <= dataArray.byteLength) {
+                fields.videoData = dataArray.slice(position, position + fieldLengths[4]);
+                log(`✅ Extracted VideoData field: ${fields.videoData.byteLength} bytes`);
+            } else {
+                log(`⚠️ VideoData field extends beyond packet bounds: pos=${position}, len=${fieldLengths[4]}, available=${dataArray.byteLength - position}`);
+            }
         }
-        
-        return {
-            packetId,
-            timestamp,
-            duration,
-            fields
-        };
+    } catch (error) {
+        log(`❌ Error extracting fields: ${error.message}`);
     }
+    
+    return {
+        packetId,
+        timestamp,
+        duration,
+        fields
+    };
+}
     
     /**
      * Process MPD data from a packet
