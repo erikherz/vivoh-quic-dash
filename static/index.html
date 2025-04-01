@@ -2197,39 +2197,53 @@ function checkPlayerReadiness() {
         let hasMoof = false;
         let hasMdat = false;
         
-        // Parse the entire fragment, not just the first few bytes
+        // Parse the entire fragment by scanning through all boxes
         while (offset + 8 <= data.byteLength) {
             // Read box size (first 4 bytes)
             const size = new DataView(data.buffer, data.byteOffset + offset, 4).getUint32(0);
             
-            // Sanity check for size
+            // Sanity check for size - must be at least 8 bytes (header) and within buffer
             if (size < 8 || size > data.byteLength - offset) {
-                break;
+                // Skip this position and try the next byte if this looks invalid
+                offset += 1;
+                continue;
             }
             
             // Read box type (next 4 bytes)
-            const type = String.fromCharCode(
+            const boxType = String.fromCharCode(
                 data[offset + 4], data[offset + 5], 
                 data[offset + 6], data[offset + 7]
             );
             
-            boxes.push({ type, size, offset });
+            // Record valid box
+            boxes.push({ type: boxType, size, offset });
             
-            if (type === 'moof') hasMoof = true;
-            if (type === 'mdat') hasMdat = true;
+            // Check for required boxes
+            if (boxType === 'moof') hasMoof = true;
+            if (boxType === 'mdat') hasMdat = true;
             
+            // Move to next box
             offset += size;
         }
         
+        // Check if the fragment is valid for DASH playback
+        const valid = hasMoof && hasMdat;
+        
         return {
-            valid: hasMoof && hasMdat,
+            valid,
             hasMoof,
             hasMdat,
             boxes,
             boxStructure: boxes.map(b => `${b.type}(${b.size})`).join(' → ')
         };
     } catch (error) {
-        return { valid: false, hasMoof: false, hasMdat: false, boxes: [], error: error.message };
+        return { 
+            valid: false, 
+            hasMoof: false, 
+            hasMdat: false, 
+            boxes: [], 
+            error: error.message 
+        };
     }
 }
 
@@ -2798,190 +2812,158 @@ function handleConnectionClosed() {
         });
     }
 
-    // Play button handler
-    const playButton = document.getElementById('playButton');
-    if (playButton) {
-        playButton.addEventListener('click', () => {
-            log(`🔍 Play button clicked`);
-            
-            try {
-                if (window.player) {
-                    log(`🔍 Player exists, checking if ready`);
+// Play button handler
+const playButton = document.getElementById('playButton');
+if (playButton) {
+    playButton.addEventListener('click', () => {
+        log(`🔍 Play button clicked`);
+        
+        try {
+            if (window.player) {
+                log(`🔍 Player exists, checking if ready`);
 
-                    // Apply all fixes before attempting playback
-                    fixPlaybackIssues();
-                    fixMediaSourceAndSegments();
+                // 1. Apply all fixes to ensure playback works
+                fixPlaybackIssues();
+                
+                // 2. Fix any media source or segment issues
+                fixMediaSourceAndSegments();
+                
+                // 3. Make sure XHR interception is properly set up
+                enhanceXHRForMediaSegments();
+                
+                // 4. Manually request init and media segments 
+                requestInitAndMediaSegments();
+                
+                const videoElement = document.getElementById('videoElement');
+                if (!videoElement) {
+                    log(`❌ Video element not found`);
+                    return;
+                }
+                
+                // Reset the media source first for a clean start
+                if (window.packetHandler && window.packetHandler.mpdUrl) {
+                    log(`🔄 Resetting player with MPD: ${window.packetHandler.mpdUrl}`);
+                    window.player.attachSource(window.packetHandler.mpdUrl);
                     
-                    // Ensure XMLHttpRequest interception is properly set up
-                    enhanceXHRForMediaSegments();
-                    
-                    // Try to manually trigger init segments
-                    requestInitAndMediaSegments();
-                    
-                    // Try to start playback
-                    const videoElement = document.getElementById('videoElement');
-                    if (!videoElement) {
-                        log('❌ Video element not found!');
-                        return;
-                    }
-                    
-                    // First check player readiness
-                    if (window.player.isReady()) {
-                        log('▶️ Player is ready, starting playback');
+                    // Short delay to allow source attachment to complete
+                    setTimeout(() => {
+                        // Request segments again after source reset
+                        requestInitAndMediaSegments();
                         
-                        // Set initial playback position
-                        try {
-                            window.player.seek(0);
-                        } catch (e) {
-                            log(`⚠️ Seek failed, but continuing: ${e.message}`);
-                        }
-                        
-                        // Start playback with error handling
-                        videoElement.play()
-                            .then(() => {
-                                log('✅ Playback started successfully');
-                                window.playerState = 'playing';
-                                updateUI();
-                                
-                                // Setup buffer logging
-                                const intervalId = setInterval(() => {
-                                    if (window.playerState === 'playing') {
-                                        try {
-                                            const videoBuffer = window.player.getBufferLength("video") || 0;
-                                            const audioBuffer = window.player.getBufferLength("audio") || 0;
-                                            log(`📊 Buffer levels: Video=${videoBuffer.toFixed(2)}s, Audio=${audioBuffer.toFixed(2)}s`);
-                                            
-                                            // Check for stalled playback
-                                            if (videoElement.paused && window.playerState === 'playing') {
-                                                log('⚠️ Playback has stalled, attempting to resume');
-                                                videoElement.play().catch(e => log(`⚠️ Resume failed: ${e.message}`));
-                                            }
-                                        } catch (e) {
-                                            log(`⚠️ Error logging buffer levels: ${e.message}`);
-                                        }
-                                    } else {
-                                        clearInterval(intervalId);
-                                    }
-                                }, 10000); // Log every 10 seconds
-                                
-                                if (!window.bufferLoggingIntervals) {
-                                    window.bufferLoggingIntervals = [];
-                                }
-                                window.bufferLoggingIntervals.push(intervalId);
-                            })
-                            .catch(error => {
-                                log(`❌ Error starting playback: ${error.message}`);
-                                
-                                // Try to recover with delay and reset
-                                log('🔄 Attempting recovery with delay and reset');
-                                window.playerState = 'buffering';
-                                updateUI();
-                                
-                                setTimeout(() => {
-                                    try {
-                                        // Reset media source
-                                        if (window.packetHandler && window.packetHandler.mpdUrl) {
-                                            log(`🔄 Reattaching source: ${window.packetHandler.mpdUrl}`);
-                                            window.player.attachSource(window.packetHandler.mpdUrl);
-                                            
-                                            // Try to play after a short delay
-                                            setTimeout(() => {
-                                                videoElement.play()
-                                                    .then(() => {
-                                                        log('✅ Delayed playback started');
-                                                        window.playerState = 'playing';
-                                                        updateUI();
-                                                    })
-                                                    .catch(e => {
-                                                        log(`❌ Delayed playback failed: ${e.message}`);
-                                                        window.playerState = 'error';
-                                                        updateUI();
-                                                    });
-                                            }, 1500);
-                                        }
-                                    } catch (e) {
-                                        log(`❌ Recovery attempt failed: ${e.message}`);
-                                        window.playerState = 'error';
-                                        updateUI();
-                                    }
-                                }, 1000);
-                            });
-                    } else {
-                        log('⚠️ Player exists but not ready yet, waiting...');
-                        window.playerState = 'buffering';
-                        updateUI();
-                        
-                        // Try a more comprehensive recovery approach with longer delay
+                        // Try to play with error handling
                         setTimeout(() => {
                             try {
-                                // Reset player connection with the MPD
-                                if (window.packetHandler && window.packetHandler.mpdUrl) {
-                                    log(`🔄 Hard reset with MPD: ${window.packetHandler.mpdUrl}`);
-                                    window.player.attachSource(window.packetHandler.mpdUrl);
-                                    
-                                    // Force request init segments again
-                                    requestInitAndMediaSegments();
-                                    
-                                    // Try playback with a longer delay
-                                    setTimeout(() => {
-                                        if (window.player.isReady()) {
-                                            log('▶️ Player now ready after reset, starting playback');
-                                            videoElement.play()
-                                                .then(() => {
-                                                    log('✅ Playback started after reset');
-                                                    window.playerState = 'playing';
-                                                    updateUI();
-                                                })
-                                                .catch(e => {
-                                                    log(`❌ Playback failed after reset: ${e.message}`);
-                                                    window.playerState = 'error';
-                                                    updateUI();
-                                                });
-                                        } else {
-                                            log('❌ Player still not ready after reset');
-                                            window.playerState = 'error';
-                                            updateUI();
+                                log(`▶️ Attempting to start playback`);
+                                videoElement.play()
+                                    .then(() => {
+                                        log(`✅ Playback started successfully`);
+                                        window.playerState = 'playing';
+                                        
+                                        // Set up buffer level monitoring
+                                        const intervalId = setInterval(() => {
+                                            if (window.playerState === 'playing') {
+                                                try {
+                                                    const videoBuffer = window.player.getBufferLength("video") || 0;
+                                                    const audioBuffer = window.player.getBufferLength("audio") || 0;
+                                                    log(`📊 Buffer levels: Video=${videoBuffer.toFixed(2)}s, Audio=${audioBuffer.toFixed(2)}s`);
+                                                } catch (e) {
+                                                    log(`⚠️ Error logging buffer levels: ${e.message}`);
+                                                }
+                                            } else {
+                                                clearInterval(intervalId);
+                                            }
+                                        }, 10000);
+                                        
+                                        if (!window.bufferLoggingIntervals) {
+                                            window.bufferLoggingIntervals = [];
                                         }
-                                    }, 2000);
-                                } else {
-                                    log('❌ Cannot reset - no MPD URL available');
-                                    window.playerState = 'error';
-                                    updateUI();
-                                }
+                                        window.bufferLoggingIntervals.push(intervalId);
+                                    })
+                                    .catch(error => {
+                                        log(`❌ Error starting playback: ${error.message}`);
+                                        window.playerState = 'error';
+                                        
+                                        // One last attempt with a clean restart
+                                        log(`🔄 Attempting one final recovery with clean restart`);
+                                        setTimeout(() => {
+                                            try {
+                                                window.player.attachSource(window.packetHandler.mpdUrl);
+                                                requestInitAndMediaSegments();
+                                                
+                                                setTimeout(() => {
+                                                    videoElement.play()
+                                                        .then(() => {
+                                                            log(`✅ Playback started after final attempt`);
+                                                            window.playerState = 'playing';
+                                                        })
+                                                        .catch(e => {
+                                                            log(`❌ Final playback attempt failed: ${e.message}`);
+                                                        });
+                                                }, 2000);
+                                            } catch (e) {
+                                                log(`❌ Error during final recovery: ${e.message}`);
+                                            }
+                                        }, 1000);
+                                    });
                             } catch (e) {
-                                log(`❌ Hard reset attempt failed: ${e.message}`);
-                                window.playerState = 'error';
-                                updateUI();
+                                log(`❌ Error attempting to play: ${e.message}`);
                             }
                         }, 2000);
-                    }
+                    }, 1000);
                 } else {
-                    log('❌ Play button clicked but player not initialized');
-                    
-                    // Try to initialize player if we have a packetHandler with MPD
-                    if (window.packetHandler && window.packetHandler.mpdUrl) {
-                        log(`🔄 Attempting to initialize player with existing MPD`);
-                        setupDashPlayer(window.packetHandler.mpdUrl);
-                        
-                        // Update UI and notify user
-                        window.playerState = 'initializing';
-                        updateUI();
-                        
-                        // Let user know we're trying to initialize
-                        alert('Player was not initialized. Attempting to initialize now - please try again in a few seconds.');
-                    } else {
-                        // No player and no MPD - cannot proceed
-                        alert('Player not initialized. Please wait for connection to establish and media to be received.');
-                    }
+                    log(`❌ No MPD URL available for reset`);
                 }
-            } catch (error) {
-                log(`❌ Error in play button handler: ${error.message}`);
-                window.playerState = 'error';
+                
                 updateUI();
-                alert(`Playback error: ${error.message}`);
+            } else {
+                log(`❌ Play button clicked but player not initialized`);
+                alert(`Player not initialized. Please wait for connection to establish and media to be received.`);
             }
-        });
+        } catch (error) {
+            log(`❌ Error in play button handler: ${error.message}`);
+            alert(`Playback error: ${error.message}`);
+        }
+    });
+}
+
+// Helper function to request initialization and media segments
+function requestInitAndMediaSegments() {
+    log(`🔄 Manually requesting initialization segments and media fragments`);
+    
+    try {
+        // Request video init segment
+        let videoInitRequest = new XMLHttpRequest();
+        videoInitRequest.open('GET', 'init_0.mp4', true);
+        videoInitRequest.responseType = 'arraybuffer';
+        videoInitRequest.send();
+        
+        // Request audio init segment
+        let audioInitRequest = new XMLHttpRequest();
+        audioInitRequest.open('GET', 'init_1.mp4', true);
+        audioInitRequest.responseType = 'arraybuffer';
+        audioInitRequest.send();
+        
+        // Request first few video segments
+        for (let i = 1; i <= 3; i++) {
+            let req = new XMLHttpRequest();
+            req.open('GET', `chunk_0_${i}.m4s`, true);
+            req.responseType = 'arraybuffer';
+            req.send();
+        }
+        
+        // Request first few audio segments
+        for (let i = 1; i <= 3; i++) {
+            let req = new XMLHttpRequest();
+            req.open('GET', `chunk_1_${i}.m4s`, true);
+            req.responseType = 'arraybuffer';
+            req.send();
+        }
+        
+        log(`✅ Segment requests initiated`);
+    } catch (error) {
+        log(`⚠️ Error requesting segments: ${error.message}`);
     }
+}
 
     // Helper function to manually request init and media segments
     function requestInitAndMediaSegments() {
@@ -3440,7 +3422,7 @@ function log(message) {
 /**
  * Check fragment metadata in detail
  */
-function checkFragmentMetadataDetailed() {
+ function checkFragmentMetadataDetailed() {
     if (!window.packetHandler) {
         log(`❌ No packet handler available`);
         return;
@@ -3450,6 +3432,7 @@ function checkFragmentMetadataDetailed() {
         const buffer = window.packetHandler.buffer[trackType];
         const fragmentIds = Object.keys(buffer).sort((a, b) => parseInt(a) - parseInt(b));
         
+        let validFragments = 0;
         let hasMoofCount = 0;
         let hasMdatCount = 0;
         let segmentSizes = [];
@@ -3457,40 +3440,20 @@ function checkFragmentMetadataDetailed() {
         fragmentIds.forEach(id => {
             const data = buffer[id];
             
-            // Check for moof and mdat boxes which are essential in a media fragment
-            let hasMoof = false;
-            let hasMdat = false;
+            // Use our improved parser to fully analyze the fragment
+            const parsedData = parseMP4Fragment(data);
             
-            for (let i = 0; i < Math.min(data.length - 8, 200); i += 4) {
-                if (i + 8 <= data.length) {
-                    const boxTypeAtPos = String.fromCharCode(
-                        data[i + 4], data[i + 5], data[i + 6], data[i + 7]
-                    );
-                    
-                    if (boxTypeAtPos === 'moof') {
-                        hasMoof = true;
-                        hasMoofCount++;
-                    }
-                    
-                    if (boxTypeAtPos === 'mdat') {
-                        hasMdat = true;
-                        hasMdatCount++;
-                    }
-                    
-                    // Once we found both boxes, no need to continue searching
-                    if (hasMoof && hasMdat) break;
-                }
-            }
+            if (parsedData.hasMoof) hasMoofCount++;
+            if (parsedData.hasMdat) hasMdatCount++;
+            if (parsedData.valid) validFragments++;
             
             segmentSizes.push(data.length);
             
             // Log details for some fragments
             if (parseInt(id) % 10 === 0 || fragmentIds.length < 10) {
-                const dataPreview = data.slice(0, Math.min(24, data.length));
-                const hexDump = Array.from(dataPreview).map(b => b.toString(16).padStart(2, '0')).join(' ');
-                
-                log(`  ${trackType} #${id}: ${data.length} bytes, moof=${hasMoof}, mdat=${hasMdat}`);
-                log(`  ${trackType} #${id} hex: ${hexDump}`);
+                const boxInfo = parsedData.boxStructure || "No valid boxes found";
+                log(`  ${trackType} #${id}: ${data.length} bytes, valid=${parsedData.valid}, moof=${parsedData.hasMoof}, mdat=${parsedData.hasMdat}`);
+                log(`  ${trackType} #${id} structure: ${boxInfo}`);
             }
         });
         
@@ -3501,15 +3464,11 @@ function checkFragmentMetadataDetailed() {
         const minSize = segmentSizes.length > 0 ? Math.min(...segmentSizes) : 0;
         const maxSize = segmentSizes.length > 0 ? Math.max(...segmentSizes) : 0;
         
-        log(`📊 ${trackType}: ${fragmentIds.length} fragments, ${hasMoofCount} with moof boxes (${Math.round(hasMoofCount/Math.max(fragmentIds.length, 1)*100)}%), ${hasMdatCount} with mdat boxes (${Math.round(hasMdatCount/Math.max(fragmentIds.length, 1)*100)}%)`);
+        log(`📊 ${trackType}: ${validFragments}/${fragmentIds.length} valid fragments, ${hasMoofCount} with moof boxes, ${hasMdatCount} with mdat boxes`);
         log(`📊 ${trackType} size stats: avg=${avgSize} bytes, min=${minSize} bytes, max=${maxSize} bytes`);
         
-        if (hasMoofCount < fragmentIds.length) {
-            log(`⚠️ WARNING: Some ${trackType} fragments are missing moof boxes! This will prevent playback.`);
-        }
-        
-        if (hasMdatCount < fragmentIds.length) {
-            log(`⚠️ WARNING: Some ${trackType} fragments are missing mdat boxes! This will prevent playback.`);
+        if (validFragments < fragmentIds.length) {
+            log(`⚠️ WARNING: Some ${trackType} fragments are missing required boxes! This will prevent playback.`);
         }
     });
 }
