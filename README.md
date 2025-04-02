@@ -2,7 +2,7 @@ The goal is to deliver a standard DASH origin file set to a CDN and then a brows
 
 The browser will buffer the DASH data, start dash.js, and intercept server requests via XHR.
 
-STATUS: April 1, 2025: Properly formatted Vivoh WebTransport Media Packets are being created by the publisher and sent via the server to the client but the client is not yet parsing and rendering these correctly. I'll work on this more tomorrow.
+STATUS: Properly formatted Vivoh WebTransport Media Packets are being created by the publisher and sent via the server to the client but the client is not yet parsing and rendering these correctly.
 
 Server Command:
 ```
