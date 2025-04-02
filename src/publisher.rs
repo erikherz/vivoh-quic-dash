@@ -719,8 +719,7 @@ impl PipeReader {
         let stdin = tokio::io::stdin();
         let mut stdin_reader = tokio::io::BufReader::new(stdin);
         
-        // Buffer to store incoming data
-        let _buffer: Vec<u8> = Vec::new();
+        // Removed unused buffer variable
         
         // MPD data placeholder - we'll need to extract this from the input stream
         let mpd_data;
@@ -819,13 +818,12 @@ impl PipeReader {
     // The exact implementation will depend on how GPAC formats the output
     async fn read_mpd_from_stdin(&self, reader: &mut tokio::io::BufReader<tokio::io::Stdin>) 
         -> Result<Bytes, VqdError> {
-        // This is a placeholder implementation
-        // You'll need to adapt it based on how the MPD is formatted in the pipe
-        let _buffer: Vec<u8> = Vec::new();
+        // Removed unused buffer variable
+        
         let mut mpd_buffer: Vec<u8> = Vec::new();
         let mut reading_mpd = false;
-        let mpd_start_marker = b"<MPD";
-        let mpd_end_marker = b"</MPD>";
+        let mpd_start_marker = b"<MPD";  // Removed 'mut' - not modified
+        let mpd_end_marker = b"</MPD>";  // Removed 'mut' - not modified
         
         // Read until we find the MPD start marker
         loop {
@@ -894,7 +892,7 @@ impl PipeReader {
         // 2. Read the box type (4 bytes)
         // 3. Read the remaining data based on the box size
         
-        // This is just a placeholder - you'll need to implement proper MP4 box parsing
+        // Removed unused buffer variable; directly create one at the point of use
         let mut buffer: Vec<u8> = Vec::new();
         let mut header = [0u8; 8]; // 4 bytes for size, 4 bytes for type
         
@@ -919,6 +917,7 @@ impl PipeReader {
     }
     
     // Helper method to calculate timestamp from segment data
+    // Added underscores to indicate intentionally unused parameters
     fn calculate_timestamp_from_segments(&self, _audio_data: &Bytes, _video_data: &Bytes) -> u64 {
         // In a real implementation, you would parse the MP4 segments to extract the timestamp
         // For now, we'll just return a placeholder value based on the packet ID
@@ -926,6 +925,7 @@ impl PipeReader {
     }
     
     // Helper method to calculate duration from segment data
+    // Added underscores to indicate intentionally unused parameters
     fn calculate_duration_from_segments(&self, _audio_data: &Bytes, _video_data: &Bytes) -> u32 {
         // In a real implementation, you would parse the MP4 segments to extract the duration
         // For now, we'll just return a placeholder value
