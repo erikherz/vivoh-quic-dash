@@ -24,5 +24,5 @@ Experimental Pipe Input Option with GPAC:
 Publisher Command (no Encoder needed):
 
 ```
-gpac -i adena.mp4:loop -f reframer:fps=30 ffenc:c=libx264:preset=fast:b=2000k:g=30:r=30 ffenc:c=aac:b=128k -o stdout:ext=mp4:frag:cdur=1:cmaf=cmfc:box=tfdt:mvex:split_mode=tracks:subs_sidx=0 | /home/ubuntu/vivoh-quic-dash/target/release/vqd-publisher --pipe --server https://va01.wtmpeg.com/live/pub
+gpac -i adena.mp4:loop -f reframer:fps=30 ffenc:c=libx264:preset=fast:b=2000k:g=30:r=30 ffenc:c=aac:b=128k -o stdout:ext=mp4:frag:cdur=1:cmaf=cmfc:box=tfdt:mvex:split_mode=tracks:subs_sidx=0:\!tsalign | /home/ubuntu/vivoh-quic-dash/target/release/vqd-publisher --pipe --server https://va01.wtmpeg.com/live/pub
 ```
