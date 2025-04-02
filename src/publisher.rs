@@ -719,14 +719,17 @@ impl PipeReader {
         let stdin = tokio::io::stdin();
         let mut stdin_reader = tokio::io::BufReader::new(stdin);
         
+        // Buffer to store incoming data
+        let _buffer: Vec<u8> = Vec::new();
+        
         // MPD data placeholder - we'll need to extract this from the input stream
-        let mut mpd_data = Bytes::new();
+        let mpd_data;
         
         info!("Starting to read from stdin pipe");
         
-        // First, read initialization segments and MPD
-        // The exact format will depend on how the encoder formats the output
-        // WIP: Need to adapt it based on the actual format
+        // First, we need to read initialization segments and MPD
+        // The exact format will depend on how GPAC formats the output
+        // This is a simplified approach - you might need to adapt it based on the actual format
         
         // Read the MPD first (assuming it comes with a header or marker)
         match self.read_mpd_from_stdin(&mut stdin_reader).await {
@@ -813,17 +816,20 @@ impl PipeReader {
     }
     
     // Helper method to read the MPD from stdin
+    // The exact implementation will depend on how GPAC formats the output
     async fn read_mpd_from_stdin(&self, reader: &mut tokio::io::BufReader<tokio::io::Stdin>) 
         -> Result<Bytes, VqdError> {
-        // WIP: Need to adapt it based on how the MPD is formatted in the pipe
-        let mut mpd_buffer = Vec::new();
+        // This is a placeholder implementation
+        // You'll need to adapt it based on how the MPD is formatted in the pipe
+        let _buffer: Vec<u8> = Vec::new();
+        let mut mpd_buffer: Vec<u8> = Vec::new();
         let mut reading_mpd = false;
         let mpd_start_marker = b"<MPD";
         let mpd_end_marker = b"</MPD>";
         
         // Read until we find the MPD start marker
         loop {
-            let mut line = Vec::new();
+            let mut line: Vec<u8> = Vec::new();
             let n = reader.read_until(b'\n', &mut line).await?;
             if n == 0 {
                 return Err(VqdError::Other("End of input before finding MPD".to_string()));
@@ -846,9 +852,11 @@ impl PipeReader {
     // Helper method to read initialization segments from stdin
     async fn read_init_segments_from_stdin(&self, reader: &mut tokio::io::BufReader<tokio::io::Stdin>) 
         -> Result<(Bytes, Bytes), VqdError> {
-        // WIP: Need to adapt it based on how the initialization segments are formatted in the pipe
+        // This is a placeholder implementation
+        // You'll need to adapt it based on how the initialization segments are formatted in the pipe
         
         // For simplicity, let's assume we can recognize init segments by some marker or pattern
+        // In reality, you might need to parse the MP4 box structure to identify them
         
         // Read audio init segment
         let audio_init = self.read_mp4_box(reader, b"moov").await?;
@@ -862,9 +870,11 @@ impl PipeReader {
     // Helper method to read a segment pair from stdin
     async fn read_segment_pair_from_stdin(&self, reader: &mut tokio::io::BufReader<tokio::io::Stdin>) 
         -> Result<(Bytes, Bytes), VqdError> {
-        // WIP: Need to adapt it based on how the media segments are formatted in the pipe
+        // This is a placeholder implementation
+        // You'll need to adapt it based on how the media segments are formatted in the pipe
         
-        // For simplicity, assume we can recognize segments by some marker or pattern
+        // For simplicity, let's assume we can recognize segments by some marker or pattern
+        // In reality, you might need to parse the MP4 box structure to identify them
         
         // Read audio segment
         let audio_data = self.read_mp4_box(reader, b"moof").await?;
@@ -876,15 +886,16 @@ impl PipeReader {
     }
     
     // Helper method to read an MP4 box from stdin
+    // This is a simplified implementation - in reality, you'll need more sophisticated parsing
     async fn read_mp4_box(&self, reader: &mut tokio::io::BufReader<tokio::io::Stdin>, box_type: &[u8]) 
         -> Result<Bytes, VqdError> {
-        // WIP: Need to:
+        // In a real implementation, you would:
         // 1. Read the box size (4 bytes)
         // 2. Read the box type (4 bytes)
         // 3. Read the remaining data based on the box size
         
-        // WIP: Need to implement proper MP4 box parsing
-        let mut buffer = Vec::new();
+        // This is just a placeholder - you'll need to implement proper MP4 box parsing
+        let mut buffer: Vec<u8> = Vec::new();
         let mut header = [0u8; 8]; // 4 bytes for size, 4 bytes for type
         
         reader.read_exact(&mut header).await?;
@@ -900,7 +911,7 @@ impl PipeReader {
         
         buffer.extend_from_slice(&header);
         
-        let mut remaining_data = vec![0u8; size - 8]; // size includes the 8-byte header
+        let mut remaining_data: Vec<u8> = vec![0u8; size - 8]; // size includes the 8-byte header
         reader.read_exact(&mut remaining_data).await?;
         buffer.extend_from_slice(&remaining_data);
         
@@ -908,15 +919,15 @@ impl PipeReader {
     }
     
     // Helper method to calculate timestamp from segment data
-    fn calculate_timestamp_from_segments(&self, audio_data: &Bytes, video_data: &Bytes) -> u64 {
-        // WIP: Need to parse the MP4 segments to extract the timestamp
+    fn calculate_timestamp_from_segments(&self, _audio_data: &Bytes, _video_data: &Bytes) -> u64 {
+        // In a real implementation, you would parse the MP4 segments to extract the timestamp
         // For now, we'll just return a placeholder value based on the packet ID
         self.packet_id as u64 * 30_000 // Assuming 30,000 ticks per second
     }
     
     // Helper method to calculate duration from segment data
-    fn calculate_duration_from_segments(&self, audio_data: &Bytes, video_data: &Bytes) -> u32 {
-        // WIP: Need to parse the MP4 segments to extract the duration
+    fn calculate_duration_from_segments(&self, _audio_data: &Bytes, _video_data: &Bytes) -> u32 {
+        // In a real implementation, you would parse the MP4 segments to extract the duration
         // For now, we'll just return a placeholder value
         30_000 // Assuming 1 second duration at 30,000 ticks per second
     }
